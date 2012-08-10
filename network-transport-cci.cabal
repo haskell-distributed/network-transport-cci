@@ -1,0 +1,83 @@
+Name:          network-transport-cci
+Version:       0.0.0.1
+Cabal-Version: >=1.8
+Build-Type:    Simple
+License:       BSD3 
+License-file:  LICENSE
+Copyright:     Parallel Scientific
+Author:        Jeff Epstein
+Maintainer:    jeff.epstein@parsci.com
+Stability:     experimental
+Bug-Reports:   mailto:jeff.epstein@parsci.com
+Synopsis:      CCI instantation of Network.Transport
+Description:   CCI instantation of Network.Transport  
+Tested-With:   GHC==7.0.4 GHC==7.2.2 GHC==7.4.1 GHC==7.4.2
+Category:      Network  
+
+Library
+  Build-Depends:   base >= 4.3 && < 5,
+                   network-transport >= 0.2 && < 0.3,
+                   data-accessor >= 0.2 && < 0.3,
+                   containers >= 0.4 && < 0.6,
+                   bytestring >= 0.9 && < 0.11,
+                   cci >= 0.2.0, binary
+  Exposed-modules: Network.Transport.CCI
+  Extensions:      DeriveDataTypeable, Rank2Types
+  ghc-options:     -Wall -fno-warn-unused-do-bind
+  HS-Source-Dirs:  src
+
+Executable TestLocal
+  main-is: tests/TestLocal.hs
+  ghc-options: -O -Wall -idist/build
+  build-depends: base, bytestring, network-transport-cci, cci, distributed-process, binary, network-transport
+
+Executable CCITest
+  main-is: tests/CCITest.hs
+  ghc-options: -O -Wall -idist/build
+  build-depends: base, bytestring, cci, binary, containers
+
+Executable TestSimple
+  main-is: tests/TestSimple.hs
+  ghc-options: -O -Wall -idist/build
+  Extensions: DeriveDataTypeable, TemplateHaskell, CPP
+  build-depends: base, bytestring, network-transport-cci, cci, distributed-process, binary, network-transport
+
+Executable TestMonitor
+  main-is: tests/TestMonitor.hs
+  ghc-options: -O -Wall -idist/build
+  Extensions: DeriveDataTypeable, TemplateHaskell, CPP
+  build-depends: base, bytestring, network-transport-cci, cci, distributed-process, binary, network-transport
+
+Test-Suite TestCH
+  Type:              exitcode-stdio-1.0
+  Main-Is:           TestCH.hs
+  Build-Depends:     base >= 4.4 && < 5,
+                     binary >= 0.5 && < 0.6,
+                     network-transport >= 0.2 && < 0.3,
+                     network-transport-tcp >= 0.2 && < 0.3,
+                     stm >= 2.3 && < 2.5,
+                     transformers >= 0.2 && < 0.4,
+                     mtl >= 2.0 && < 2.2,
+                     data-accessor >= 0.2 && < 0.3,
+                     bytestring >= 0.9 && < 0.11,
+                     containers >= 0.4 && < 0.6,
+                     old-locale >= 1.0 && < 1.1,
+                     time >= 1.2 && < 1.5,
+                     template-haskell >= 2.6 && < 2.8,
+                     random >= 1.0 && < 1.1,
+                     ghc-prim >= 0.2 && < 0.3,
+                     ansi-terminal >= 0.5 && < 0.6, distributed-process,cci
+  Extensions:        RankNTypes,
+                     ScopedTypeVariables,
+                     FlexibleInstances,
+                     UndecidableInstances,
+                     ExistentialQuantification,
+                     GADTs,
+                     GeneralizedNewtypeDeriving,
+                     DeriveDataTypeable,
+                     TemplateHaskell,
+                     CPP
+  ghc-options:       -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind 
+  HS-Source-Dirs:    tests src
+
+
