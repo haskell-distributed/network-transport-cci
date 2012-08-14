@@ -22,7 +22,7 @@ Library
                    bytestring >= 0.9 && < 0.11,
                    cci >= 0.2.0, binary
   Exposed-modules: Network.Transport.CCI
-  Extensions:      DeriveDataTypeable, Rank2Types
+  Extensions:      DeriveDataTypeable, Rank2Types, BangPatterns
   ghc-options:     -Wall -fno-warn-unused-do-bind
   HS-Source-Dirs:  src
 
@@ -60,7 +60,7 @@ Test-Suite TestCH
                      GADTs,
                      GeneralizedNewtypeDeriving,
                      DeriveDataTypeable,
-                     TemplateHaskell,
+                     TemplateHaskell, BangPatterns,
                      CPP
   ghc-options:       -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind 
   HS-Source-Dirs:    tests src

@@ -26,6 +26,8 @@ import Control.Distributed.Process.Node
 import Control.Distributed.Process.Serializable (Serializable)
 import TestAuxiliary
 
+import Debug.Trace
+
 newtype Ping = Ping ProcessId
   deriving (Typeable, Binary, Show)
 
@@ -56,7 +58,7 @@ bigPing = do
   BigPong partner fill <- expect
   self <- getSelfPid
   send partner (BigPing self fill)
-  ping
+  bigPing
 
 -- | Basic big ping test
 testBigPing :: NT.Transport -> IO ()
@@ -74,7 +76,7 @@ testBigPing transport = do
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     pingServer <- readMVar serverAddr
-    let numPings = 10000
+    let numPings = 1000
         pingSize = 10000
 
     tryRunProcess localNode $ do
@@ -136,8 +138,9 @@ monitorOrLink mOrL pid mSignal = do
                     else link pid >> return Nothing
   -- Monitor is asynchronous, which usually does not matter but if we want a
   -- *specific* signal then it does. Therefore we wait an arbitrary delay and
-  -- hope that this means the monitor has been set up
-  forM_ mSignal $ \signal -> liftIO . forkTry $ threadDelay 100000 >> putMVar signal ()
+  -- hope that this means the monitor has been set up.
+  -- JE This delay has been increased in CCI versus in the TCP tests
+  forM_ mSignal $ \signal -> liftIO . forkTry $ threadDelay 1000000 >> putMVar signal ()
   return result
 
 monitorTestProcess :: ProcessId       -- Process to monitor/link to
@@ -158,7 +161,7 @@ monitorTestProcess theirAddr mOrL un reason monitorSetup done =
                 liftIO $ putMVar done ()
               (False, ref) -> do
                 ProcessMonitorNotification ref' pid reason' <- expect
-                liftIO $ (putStrLn $ show (reason, reason'))
+--                liftIO $ putStrLn $ "OUT.." ++ show (reason, reason')
                 True <- return $ Just ref' == ref && pid == theirAddr && mOrL && reason == reason'
                 liftIO $ putMVar done ()
         )
@@ -183,7 +186,7 @@ testMonitorUnreachable transport mOrL un = do
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     theirAddr <- readMVar deadProcess
-    tryRunProcess localNode $
+    runProcess localNode $
       monitorTestProcess theirAddr mOrL un DiedDisconnect Nothing done 
 
   takeMVar done
@@ -197,7 +200,7 @@ testMonitorNormalTermination transport mOrL un = do
 
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
-    addr <- forkProcess localNode $ 
+    addr <- forkProcess localNode $ do
       liftIO $ readMVar monitorSetup
     putMVar monitoredProcess addr
 
@@ -283,7 +286,7 @@ testMonitorDisconnect transport mOrL un = do
 
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
-    addr <- forkProcess localNode . liftIO $ threadDelay 1000000 
+    addr <- forkProcess localNode . liftIO $ (threadDelay 2000000)
     putMVar processAddr addr
     readMVar monitorSetup
     NT.closeEndPoint (localEndPoint localNode)
@@ -291,7 +294,7 @@ testMonitorDisconnect transport mOrL un = do
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     theirAddr <- readMVar processAddr
-    tryRunProcess localNode $ do
+    runProcess localNode $ do
       monitorTestProcess theirAddr mOrL un DiedDisconnect (Just monitorSetup) done
   
   takeMVar done
@@ -482,7 +485,6 @@ testMergeChannels transport = do
         ms   <- mapM (mergePorts biasedInner) rss
         m    <- mergePorts biasedOuter ms
         xs   <- replicateM (9 * 3) $ receiveChan m 
-        liftIO $ putStrLn $ show (xs,expected)
         True <- return $ xs == expected
         return ()
 
@@ -525,7 +527,6 @@ testMergeChannels transport = do
         liftIO $ mapM_ (uncurry putMVar) $ zip vs ss 
         m  <- mergePorts biased rs 
         xs <- replicateM (6 * 3) $ receiveChan m
-        liftIO $ putStrLn $ show (xs,  "abcacbbacbcacabcba")
         True <- return $ xs == "abcacbbacbcacabcba"
         return ()
 
@@ -640,6 +641,7 @@ testSpawnLocal transport = do
 main :: IO ()
 main = do
   Right transport <- createTransport defaultCCIParameters
+-- previously: createTransport "127.0.0.1" "8080" defaultTCPParameters 
   runTests 
     [ ("Ping",             testPing             transport)
     , ("BigPing",          testBigPing          transport)
