@@ -623,8 +623,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                 do sendInitMsg
                                    takeMVar (cciRMARemoteHandle rmastate)
          doRMA = do (remoteh, remoteid) <- getRemoteHandle -- TODO or we can get failure here -- abort
-                    BSC.useAsCStringLen allbs $ \cstr ->  -- TODO if there's an error here, call freeRemoteBuffer False
-                       withRMABuffer endpoint cstr CCI.RMA_READ  $ \localh ->
+                    withRMABuffer endpoint allbs CCI.RMA_READ  $ \localh -> -- TODO if this throws, freeRemoteBuffer False
                           let chunksAndFlags = reverse (zip (reverse chunks) ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT]))
                            in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts) -> 
                                    CCI.rmaWrite realconn Nothing remoteh (toEnum buffOffset) localh (toEnum buffOffset) (toEnum buffLength) 
@@ -643,9 +642,10 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                       else [(fullchunks*chunkSize,partialchunk)]
                
 -- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time
-withRMABuffer :: CCIEndpoint -> CStringLen -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
-withRMABuffer endpoint cstr mode f =
-   CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
+withRMABuffer :: CCIEndpoint -> ByteString -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
+withRMABuffer endpoint bs mode f =
+   BSC.useAsCStringLen bs $ \cstr ->
+       CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
 
 makeRMABuffer :: Int -> CCIEndpoint -> CCI.RMA_MODE -> IO (CStringLen, CCI.RMALocalHandle)
 makeRMABuffer rmasize endpoint mode = 
