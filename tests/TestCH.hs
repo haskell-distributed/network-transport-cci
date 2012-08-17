@@ -26,8 +26,6 @@ import Control.Distributed.Process.Node
 import Control.Distributed.Process.Serializable (Serializable)
 import TestAuxiliary
 
-import Debug.Trace
-
 newtype Ping = Ping ProcessId
   deriving (Typeable, Binary, Show)
 
@@ -61,8 +59,8 @@ bigPing = do
   bigPing
 
 -- | Basic big ping test
-testBigPing :: NT.Transport -> IO ()
-testBigPing transport = do
+testBigPing :: NT.Transport -> Bool -> Int -> Int -> IO ()
+testBigPing transport concurrent numPings pingSize = do
   serverAddr <- newEmptyMVar
   clientDone <- newEmptyMVar
 
@@ -76,19 +74,27 @@ testBigPing transport = do
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     pingServer <- readMVar serverAddr
-    let numPings = 1000
-        pingSize = 10000
 
     tryRunProcess localNode $ do
-      pid <- getSelfPid
-      replicateM_ numPings $ do
-        send pingServer (BigPong pid (replicate pingSize '!'))
-        BigPing _ _ <- expect
-        return ()
+      case concurrent of
+        False -> 
+         replicateM_ numPings $ pinger pingServer
+        True -> do procs <- replicateM numPings $ do rv <- liftIO $ newEmptyMVar
+                                                     spawnLocal $ do pinger pingServer
+                                                                     liftIO $ putMVar rv ()
+                                                     return rv
+                   liftIO $ forM_ procs takeMVar
+                   
 
     putMVar clientDone ()
 
   takeMVar clientDone
+    where 
+          pinger pingServer = 
+              do pid <- getSelfPid
+                 send pingServer (BigPong pid (replicate pingSize '!'))
+                 BigPing _ _ <- expect
+                 return ()
 
 
 -- | The ping server from the paper
@@ -644,7 +650,9 @@ main = do
 -- previously: createTransport "127.0.0.1" "8080" defaultTCPParameters 
   runTests 
     [ ("Ping",             testPing             transport)
-    , ("BigPing",          testBigPing          transport)
+    , ("BigPing",          testBigPing          transport False 1000 10000)
+    , ("VeryBigPing",      testBigPing          transport False 10   1000000)
+    , ("ConcurrentBigPing",testBigPing          transport True  100  10000)
     , ("Math",             testMath             transport) 
     , ("Timeout",          testTimeout          transport)
     , ("Timeout0",         testTimeout0         transport)

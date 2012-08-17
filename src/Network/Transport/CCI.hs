@@ -12,34 +12,34 @@ module Network.Transport.CCI
      ReceiveStrategy(..)
   ) where
 
-import Control.Monad (liftM)
+import Control.Monad (liftM, forM_, when)
 import Control.Concurrent.Chan
-import Control.Concurrent (forkIO, ThreadId, killThread)
+import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.MVar
-import Control.Exception (catch, try, SomeException, throwIO, Exception)
+import Control.Exception (catch, try, SomeException, throw, throwIO, Exception, finally)
 import Data.Binary (Binary,put,get,getWord8, putWord8, encode,decode)
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
-import qualified Data.List as List (lookup)
+import qualified Foreign.Marshal.Alloc as Alloc
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
 import Network.CCI (WordPtr)
+import Foreign.C.String (CStringLen)
 import Network.Transport.Internal (timeoutMaybe)
 import Network.Transport (EventErrorCode(..), Transport(..), TransportError(..), NewEndPointErrorCode(..), EndPointAddress(..), Event(..), TransportError, ConnectErrorCode(..), EndPoint(..), SendErrorCode(..), NewMulticastGroupErrorCode(..), ResolveMulticastGroupErrorCode(..), Reliability(..), ConnectHints(..), Connection(..), ConnectionId)
 import Prelude hiding (catch)
-import qualified Data.ByteString.Char8 as BSC (head, tail, singleton,pack, unpack, empty, length)
+import qualified Data.ByteString.Char8 as BSC (packCStringLen, concat, useAsCStringLen, head, tail, singleton,pack, unpack, empty, length)
 import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
 import qualified Data.Map as Map
-import qualified Network.CCI as CCI (accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), endpointURI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connectionMaxSendSize, sendv, SEND_FLAG(..), disconnect, EndpointOption(..), setEndpointOpt)
+import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), endpointURI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connectionMaxSendSize, sendv, SEND_FLAG(..), disconnect, EndpointOption(..), setEndpointOpt)
 import System.Posix.Types (Fd)
 
-import Debug.Trace
-
 -- TODO: carefully read tests from distributed-process and network-transport-tcp, implement here
--- TODO: play with keepalive timeout, extend CCIParameters to support other endpoint options
+-- TODO: wait for ONL to implement keepalive timeout, extend CCIParameters to support other endpoint options
 -- TODO: use CCI.strError to display better exceptions
 -- TODO: use Transport.ErrorEvent (esp. ConnectionLost) in response to bogus requests; throw $ userError when shutting down transport or endpoint
 -- TODO: handle unexpected termination eventloop by closing transport and reporting error to CH
+-- TODO reduce excessive copying when transmitting RMA buffers
 
 data CCIParameters = CCIParameters {
         -- | How long to wait, in microseconds, before deciding that an attempt
@@ -89,11 +89,21 @@ data CCIEndpoint = CCIEndpoint
       cciEndpointFinalized :: MVar ()
    }
 
+type RMATransferId = Int
+
 data CCIEndpointState = CCIEndpointValid {
                           cciNextConnectionId :: !ConnectionId,
                           cciEndpointThread :: ThreadId,
-                          cciConnectionsById :: Map.Map ConnectionId CCIConnection -- TODO change to IntMap. why not?
+                          cciRMAState :: Map.Map RMATransferId CCIRMAState, -- TODO IntMap
+                          cciRMANextTransferId :: !RMATransferId,
+                          cciConnectionsById :: Map.Map ConnectionId CCIConnection -- TODO IntMap
                         } | CCIEndpointClosed
+
+data CCIRMAState = CCIRMAState {
+        cciRMARemoteHandle :: MVar (CCI.RMARemoteHandle,RMATransferId),
+        cciOutstandingChunks :: Int,
+        cciRMAComplete :: MVar ()
+     }
 
 data CCIConnection = CCIConnection
    {
@@ -123,6 +133,9 @@ data CCIErrorCode =
 data ControlMessage = 
           ControlMessageCloseConnection -- ^ Request that the given connection terminate (and notify CH)
         | ControlMessageInitConnection Reliability EndPointAddress -- ^ Finish initializaion of the connection (and notify CH)
+        | ControlMessageInitRMA {rmaSize :: Int, rmaId :: RMATransferId, rmaEndpointAddress :: String}
+        | ControlMessageAckInitRMA {rmaAckOrginatingId :: RMATransferId, rmaAckRemoteId :: RMATransferId, rmaAckRemoteHandle :: ByteString}
+        | ControlMessageFinalizeRMA {rmaOk :: Bool, rmaRemoteFinalizingId :: RMATransferId}
           deriving (Typeable)
 
 -- This really belongs in Network.Transport
@@ -140,12 +153,26 @@ instance Binary Reliability where
 instance Binary ControlMessage where
   put ControlMessageCloseConnection = putWord8 0
   put (ControlMessageInitConnection r ep) = putWord8 1 >> put r >> put ep
+  put (ControlMessageInitRMA rs rid repa) = putWord8 2 >> put rs >> put rid >> put repa
+  put (ControlMessageAckInitRMA roid rrid bs) = putWord8 3 >> put roid >> put rrid >> put bs
+  put (ControlMessageFinalizeRMA rok rfin) = putWord8 4 >> put rok >> put rfin
   get = do hdr <- getWord8
            case hdr of
              0 -> return ControlMessageCloseConnection
              1 -> do r <- get
                      ep <- get
                      return $ ControlMessageInitConnection r ep
+             2 -> do rs <- get
+                     rid <- get
+                     repa <- get
+                     return $ ControlMessageInitRMA rs rid repa
+             3 -> do roid <- get
+                     rrid <- get
+                     bs <- get
+                     return $ ControlMessageAckInitRMA roid rrid bs
+             4 -> do rok <- get
+                     rfin <- get
+                     return $ ControlMessageFinalizeRMA rok rfin
              _ -> fail "ControlMessage.get: invalid" 
 
 getEndpointAddress :: CCIEndpoint -> EndPointAddress
@@ -201,6 +228,8 @@ apiNewEndPoint transport =
             CCITransportStateValid ->
                do endpstate <- newMVar $ 
                         CCIEndpointValid {
+                            cciRMAState = Map.empty,
+                            cciRMANextTransferId = 1,
                             cciNextConnectionId = 0,
                             cciEndpointThread = thrd,
                             cciConnectionsById = Map.empty }
@@ -249,11 +278,36 @@ endpointHandler mv =
         exceptionHandler e = dbg $ "Exception in endpointHandler: "++show e
         go transport endpoint = endpointLoop transport endpoint
 
+allocCStringLen :: Int -> IO CStringLen
+allocCStringLen size = 
+   do buf <- Alloc.mallocBytes size
+      return (buf, size)
+
+freeCStringLen :: CStringLen -> IO ()
+freeCStringLen (buf,_) = Alloc.free buf
+
+data EndpointLoopState = EndpointLoopState
+    {
+       eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId,
+       eplsNextConnectionId :: !ConnectionId,
+       eplsNextTransferId :: !RMATransferId,
+       eplsTransfers :: Map.Map RMATransferId (CCI.RMALocalHandle, CStringLen) -- TODO IntMap
+    }
+
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
 endpointLoop transport endpoint =
- let loop :: Map.Map CCI.Connection ConnectionId -> ConnectionId -> IO ()
-     loop !connectionsByConnection !nextConnectionId = 
-        do ret <- receiveEvent transport endpoint $ \ev -> 
+ let newEpls = EndpointLoopState {eplsNextConnectionId = 0, 
+                                  eplsConnectionsByConnection = Map.empty,
+                                  eplsNextTransferId = 0,
+                                  eplsTransfers = Map.empty}
+     loop :: EndpointLoopState -> IO ()
+     loop epls = 
+       case epls of 
+         EndpointLoopState {eplsNextConnectionId = nextConnectionId,
+                            eplsConnectionsByConnection = connectionsByConnection,
+                            eplsNextTransferId = nextTransferId,
+                            eplsTransfers = transfers} ->
+           do ret <- receiveEvent transport endpoint $ \ev -> 
                 case ev of
 
 -- | The connection packet will be blank, in which case this is a real
@@ -264,45 +318,86 @@ endpointLoop transport endpoint =
                       do msg <- CCI.packEventBytes eb
                          case BSC.unpack msg of
                             [] -> do CCI.accept sev (toEnum nextConnectionId)
-                                     return $ Just (connectionsByConnection,nextConnectionId+1)
+                                     return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                             shutdown | shutdown == magicEndpointShutdown ->
                                   do CCI.reject sev
                                      return Nothing 
                             _ ->  do dbg "Unknown connection magic word"
                                      CCI.reject sev
-                                     return $ Just (connectionsByConnection,nextConnectionId)
-                  CCI.EvSend _ctx _status _conn ->
-                      return $ Just (connectionsByConnection, nextConnectionId)
+                                     return $ Just epls
+                  CCI.EvSend ctx _status _conn ->
+                      case ctx of
+                         0 -> return () -- ordinary send confirmation
+                         rmaid -> withMVar (cciEndpointState endpoint) $ \st -> -- TODO check status flag, possibly return error value
+                                    case st of
+                                       CCIEndpointValid {cciRMAState = rmaState} ->
+                                          case Map.lookup (fromEnum rmaid) rmaState of
+                                             Nothing -> dbg "Bogus RMA ID"
+                                             Just rmas -> putMVar (cciRMAComplete rmas) ()
+                                       _ -> dbg "Endpoint already dead" 
+                        >> (return $ Just epls)
                   CCI.EvRecv eb conn -> 
-                      let mconnid = Map.lookup conn connectionsByConnection
-                       in do case mconnid of
-                               Nothing -> do dbg $ "Unknown connection in EvRecv: " ++ show conn
-                                             return $ Just (connectionsByConnection,nextConnectionId)
-                               Just connid -> do msg <- CCI.packEventBytes eb
-                                                 case ord $ BSC.head msg of
-                                                    0 -> do putEvent endpoint (Received connid [BSC.tail msg]) -- normal message
-                                                            return $ Just (connectionsByConnection,nextConnectionId)
-                                                    _ -> case decode $ BSL.fromChunks [BSC.tail msg] of
-                                                            ControlMessageInitConnection rel epa -> 
-                                                               do putEvent endpoint (ConnectionOpened connid rel epa)
-                                                                  return $ Just (connectionsByConnection, nextConnectionId)
-                                                            ControlMessageCloseConnection ->
-                                                               do CCI.disconnect conn
-                                                                  putEvent endpoint (ConnectionClosed connid)
-                                                                  return $ Just (Map.delete conn connectionsByConnection, nextConnectionId)
-                  CCI.EvConnect connectionId (Left failure) ->
+                      let connid = case Map.lookup conn connectionsByConnection of
+                                      Nothing -> throw (userError $ "Unknown connection in EvRecv: " ++ show conn)
+                                      Just val ->  val
+                       in do msg <- CCI.packEventBytes eb
+                             case ord $ BSC.head msg of
+                                  0 -> do putEvent endpoint (Received connid [BSC.tail msg]) -- normal message
+                                          return $ Just epls
+                                  _ -> case decode $ BSL.fromChunks [BSC.tail msg] of
+                                          ControlMessageInitConnection rel epa -> 
+                                             do putEvent endpoint (ConnectionOpened connid rel epa)
+                                                return $ Just epls
+                                          ControlMessageCloseConnection ->
+                                             do CCI.disconnect conn
+                                                putEvent endpoint (ConnectionClosed connid)
+                                                return $ Just epls {eplsConnectionsByConnection = Map.delete conn connectionsByConnection}
+                                          ControlMessageInitRMA {rmaSize=rmasize, 
+                                                                 rmaId=orginatingId} -> -- TODO error handling, if allocaiton fails sends a NACK
+                                             do (cstr, localh) <- makeRMABuffer rmasize endpoint CCI.RMA_WRITE
+                                                let notify = ControlMessageAckInitRMA
+                                                           {rmaAckOrginatingId=orginatingId,
+                                                            rmaAckRemoteId = nextTransferId, 
+                                                            rmaAckRemoteHandle = CCI.rmaHandle2ByteString localh}
+                                                sendControlMessageInside transport endpoint conn notify
+                                                return $ Just epls {eplsNextTransferId = nextTransferId+1,
+                                                                    eplsTransfers = Map.insert nextTransferId (localh, cstr) transfers}
+                                          ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
+                                                            rmaAckRemoteId = remoteId, 
+                                                            rmaAckRemoteHandle = bs} -> -- TODO error handling
+                                             let Just remoteHandle = CCI.createRMARemoteHandle bs
+                                              in withMVar (cciEndpointState endpoint) $ \st ->
+                                                   case st of
+                                                      CCIEndpointValid {cciRMAState = rmastate} ->
+                                                         case Map.lookup originatingId rmastate of
+                                                           Nothing -> dbg "Bogus originating id"
+                                                           Just myrma -> putMVar (cciRMARemoteHandle myrma)
+                                                                 (remoteHandle, remoteId)
+                                                      _ -> dbg "Unexpected endpoint state"
+                                                  >> (return $ Just epls)
+                                          ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid} ->
+                                             case Map.lookup remoteid transfers of
+                                               Nothing -> dbg "Bogus transfer id"
+                                               Just (lhandle, cstr) -> 
+                                                   do when ok $ 
+                                                         do buffermsg <- BSC.packCStringLen cstr
+                                                            putEvent endpoint (Received connid [buffermsg])
+                                                      freeRMABuffer endpoint (cstr,lhandle) 
+                                              >> (return $ Just epls {eplsTransfers = Map.delete remoteid transfers})
+                  CCI.EvConnect connectionId (Left status) ->
 -- TODO: change connection state to error/invalid/closed
                       do modifyMVar_ (cciEndpointState endpoint) $ \st ->
                            case st of
                              CCIEndpointValid {cciConnectionsById = connections} ->
-                               let theconn = Map.lookup (fromEnum connectionId) connections 
+                               let theconn = Map.lookup (fromEnum connectionId) connections -- this conversion (WordPtr to ConnectionId) is probably okay
                                    newmap = Map.delete (fromEnum connectionId) connections 
                                 in maybe (return ()) (\tc -> putMVar (cciReady tc) 
-                                       (Just $ TransportError ConnectNotFound (show failure))) theconn >>
+                                       (Just $ TransportError ConnectNotFound ("Failed connection unknown: "++show connectionId))) theconn >>
                                    return (st {cciConnectionsById = newmap})
                              _ -> return (st)
-                         dbg $ "Connection " ++ show connectionId ++ " failed with " ++ show failure
-                         return $ Just (connectionsByConnection, nextConnectionId)
+                         statusMsg <- CCI.strError (Just $ cciEndpoint endpoint) status
+                         dbg $ "Connection " ++ show connectionId ++ " failed with " ++ statusMsg
+                         return $ Just epls
                   CCI.EvConnect connectionId (Right conn) ->
                       do withMVar (cciEndpointState endpoint) $ \st ->
                            case st of
@@ -323,28 +418,29 @@ endpointLoop transport endpoint =
                                                     show connectionId ++ " in state " ++ show connstate
                                                   return (connstate, ())
                              _ -> dbg "Can't handle EvConnect when endpoint is closed"
-                         return $ Just (connectionsByConnection, nextConnectionId)
+                         return $ Just epls
                   CCI.EvAccept connectionId (Left status) ->
-                      do dbg ("Failed EvAccept on connection " ++ show connectionId ++ " because " ++ show status)
-                         return $ Just (connectionsByConnection,nextConnectionId)
+                      do statusMsg <- CCI.strError (Just $ cciEndpoint endpoint) status
+                         dbg ("Failed EvAccept on connection " ++ show connectionId ++ " because " ++ statusMsg)
+                         return $ Just epls
                   CCI.EvAccept connectionId (Right conn) -> 
                       -- The connection is not fully ready until it gets an EvAccept. Therefore,
                       -- there is a possible race condition if the other (originating) side receives
                       -- its EvConnect and tries to send a message before this (target) side is ready.
                       let newmap = Map.insert conn (fromEnum connectionId) connectionsByConnection
-                       in return $ Just (newmap, nextConnectionId)
+                       in return $ Just epls {eplsConnectionsByConnection = newmap}
                   CCI.EvKeepAliveTimedOut _conn ->
-                     do dbg $ show ev
-                        return $ Just (connectionsByConnection, nextConnectionId)
+                     do dbg $ show ev -- TODO another endpoint has died: tell CH
+                        return $ Just epls
                   CCI.EvEndpointDeviceFailed _endp ->
-                     do dbg $ show ev
-                        return $ Just (connectionsByConnection, nextConnectionId)
-           case ret of
-              Nothing -> do -- TODO destroyEndpoint seems to lock up
-                            --CCI.destroyEndpoint (cciEndpoint endpoint) 
-                             putMVar (cciEndpointFinalized endpoint) ()
-              Just (conns,next) -> loop conns next
-  in loop Map.empty 0 
+                     do dbg $ show ev -- TODO this endpoint has died: tell CH
+                        putErrorEvent endpoint (Just $ getEndpointAddress endpoint) (Map.elems connectionsByConnection) "Device failed" -- TODO test me
+                        return $ Just epls
+              case ret of
+                 Nothing -> do --CCI.destroyEndpoint (cciEndpoint endpoint)  -- TODO this hangs/segfaults
+                                putMVar (cciEndpointFinalized endpoint) ()
+                 Just newstate -> loop newstate
+  in loop newEpls 
         
 -- | Notify CH that something happened. Usually, a connection was opened or closed or a message was received.
 putEvent :: CCIEndpoint -> Event -> IO ()
@@ -407,7 +503,7 @@ apiConnect :: CCITransport -> CCIEndpoint ->
               EndPointAddress -> Reliability -> 
               ConnectHints -> 
               IO (Either (TransportError ConnectErrorCode) Connection)
-apiConnect transport endpoint remoteaddress reliability hints = 
+apiConnect transport endpoint remoteaddress reliability _hints = 
   try $ mapCCIException (translateException ConnectFailed) $ 
       do (cciconn, transportconn, _cid) <- createConn
          timeoutMaybe (maybeTimeout) (TransportError ConnectTimeout "Connection reply timeout") (waitReady cciconn)
@@ -435,7 +531,7 @@ apiConnect transport endpoint remoteaddress reliability hints =
                                       send  = apiSend transport endpoint theconn,
                                       close = apiCloseConnection transport endpoint theconn
                                     }
-                                requestConnection (fromIntegral cid)
+                                requestConnection (fromIntegral cid) -- TODO this conversion (Int to WordPtr) is probablay okay
                                 return (newst,((theconn,transportconn, cid)))
                      _ -> 
                          throwIO (TransportError ConnectFailed "Endpoint invalid")
@@ -453,32 +549,114 @@ apiConnect transport endpoint remoteaddress reliability hints =
 -- Since we will also use control messages to provide RMA admin, we can't send them on RMA 
 apiSend :: CCITransport -> CCIEndpoint -> CCIConnection -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
 apiSend transport endpoint conn bs = 
-  sendCore transport endpoint conn (0::WordPtr) True (BSC.singleton (chr 0):bs)
+  sendCore transport endpoint conn (0::WordPtr) False bs
 
 sendControlMessage :: CCITransport -> CCIEndpoint -> CCIConnection -> ControlMessage -> IO (Either (TransportError SendErrorCode) ())
 sendControlMessage transport endpoint conn bs = 
-  sendCore transport endpoint conn (0::WordPtr) False (BSC.singleton (chr 1):BSL.toChunks (encode bs)) >>= dbgEither
+  sendCore transport endpoint conn (0::WordPtr) True (BSL.toChunks (encode bs)) >>= dbgEither
+
+sendControlMessageInside :: CCITransport -> CCIEndpoint -> CCI.Connection -> ControlMessage -> IO ()
+sendControlMessageInside _transport _endpoint conn bs = 
+   sendSimple conn (BSC.singleton (chr 1):BSL.toChunks (encode bs)) (0::WordPtr)
 
 -- | CCI has a maximum message size of maxMessageLength. For short messages, we will send them the
 -- normal way, but for longer messages we are obligated to use CCI's RMA mechanism
 sendCore :: CCITransport -> CCIEndpoint -> CCIConnection -> WordPtr -> Bool -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
-sendCore _ _ conn context allowRMA bs = 
+sendCore transport endpoint conn context isCtrlMsg bs = 
   try $ mapCCIException (translateException SendFailed) $ 
      withMVar (cciConnectionState conn) $ \st ->
         case st of
            CCIConnectionConnected {cciMaxSendSize = maxMessageLength,
                                    cciConnection = realconnection} ->
-             if messageLength > fromIntegral maxMessageLength && allowRMA
-                then sendRMA realconnection bs context
-                else sendSimple realconnection bs context
+             if (messageLength > fromIntegral maxMessageLength && not isCtrlMsg)
+                then sendRMA transport endpoint conn realconnection bs context 
+                else sendSimple realconnection augmentedbs context
            CCIConnectionInit -> dbg "Connection not initialized" >>
                     throwIO (TransportError SendClosed "Connection not initialized")
            CCIConnectionClosed -> dbg "Connection already closed" >> 
                     throwIO (TransportError SendClosed "Connection already closed")
+   
     where messageLength = sum (map BSC.length bs)
+          augmentedbs = msgprefix:bs
+          msgprefix = case isCtrlMsg of
+                        True -> BSC.singleton (chr 1)
+                        False -> BSC.singleton (chr 0)
 
-sendRMA :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
-sendRMA = error "Unsupported" --TODO
+-- | For RMA transmissions, we do this:
+-- 1. Allocate a local transfer ID on this endpoint
+-- 2. Send an InitRMA message to the other side, along with the size of the buffer we want to send
+-- 3. Remote side allocates buffer, send back an acknowledgement with its remote buffer handle and its remote transfer ID
+-- 4. We move the message to a local RMA buffer, and call rmaWrite to send the data to the remote buffer
+-- 5. We wait for transmission confirmation via an EvSend with our local transfer ID
+-- 6. After we get confirmation, we can release the local buffer and send a FinalizeRMA message to the other side
+-- 7. The other side copies its buffers to a message, sends it to CH, and frees its buffers
+sendRMA :: CCITransport -> CCIEndpoint -> CCIConnection -> CCI.Connection -> [ByteString] -> WordPtr -> IO ()
+sendRMA transport endpoint _conn realconn bs _ctx = 
+  do (rmatid,rmastate) <- modifyMVar (cciEndpointState endpoint) $ \st ->
+       case st of
+        CCIEndpointValid 
+          {cciRMANextTransferId=nextTransferId,
+           cciRMAState=rmaState} -> 
+             let tid = case nextTransferId of
+                         0 -> nextTransferId + 1 -- Skip over ID zero, since context 0 is used for regular messages
+                         _ -> nextTransferId
+              in do rmaRemoteHandle <- newEmptyMVar
+                    rmaComplete <- newEmptyMVar
+                    let myRmaState = CCIRMAState
+                                       {
+                                          cciRMARemoteHandle = rmaRemoteHandle,
+                                          cciRMAComplete = rmaComplete,
+                                          cciOutstandingChunks = length chunks
+                                       }
+                    return (st {cciRMANextTransferId=tid+1,
+                             cciRMAState=Map.insert tid myRmaState rmaState},(tid,myRmaState))
+        _ -> throwIO (TransportError SendFailed "Endpoint invalid")
+     let initMsg = 
+           ControlMessageInitRMA {rmaSize = msgLength, rmaId = rmatid, rmaEndpointAddress = cciUri endpoint} -- remote side allocates buffer and sends back RemoteHandle, which local event handler puts into cciRMARemoteHandle
+         freeRemoteBuffer remoteid ok = sendControlMessageInside transport endpoint realconn --TODO swallow error/timeout here
+               ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
+         sendInitMsg = sendControlMessageInside transport endpoint realconn initMsg
+         eraseRmaState = modifyMVar_ (cciEndpointState endpoint) (\st -> return st {cciRMAState = Map.delete rmatid (cciRMAState st)})
+         maybeTimeout = fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
+         err = TransportError SendFailed "RMA partner failed to respond"
+         getRemoteHandle = timeoutMaybe maybeTimeout err $
+                                do sendInitMsg
+                                   takeMVar (cciRMARemoteHandle rmastate)
+         doRMA = do (remoteh, remoteid) <- getRemoteHandle -- TODO or we can get failure here -- abort
+                    BSC.useAsCStringLen allbs $ \cstr ->  -- TODO if there's an error here, call freeRemoteBuffer False
+                       withRMABuffer endpoint cstr CCI.RMA_READ  $ \localh ->
+                          let chunksAndFlags = reverse (zip (reverse chunks) ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT]))
+                           in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts) -> 
+                                   CCI.rmaWrite realconn Nothing remoteh (toEnum buffOffset) localh (toEnum buffOffset) (toEnum buffLength) 
+                                   (toEnum rmatid::WordPtr) opts
+                                 takeMVar (cciRMAComplete rmastate)  -- TODO check failure from EvSend
+                    freeRemoteBuffer remoteid True -- TODO if the CCI people fix send confirmations, this won't be necessary: the framework will send a receipt notice to the receiving side
+     doRMA `finally` eraseRmaState
+         where allbs = BSC.concat bs
+               msgLength = BSC.length allbs
+               chunkSize = msgLength --2048 -- it seems that it isn't necessary to perform mutliple rmaWrites after all
+               (fullchunks,partialchunk) = msgLength `divMod` chunkSize
+               chunks = take fullchunks ([ (offsets,chunkSize) | offsets<-[0,chunkSize..]]) 
+                           ++ maybePartialChunk
+               maybePartialChunk = if partialchunk==0
+                                      then []
+                                      else [(fullchunks*chunkSize,partialchunk)]
+               
+-- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time
+withRMABuffer :: CCIEndpoint -> CStringLen -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
+withRMABuffer endpoint cstr mode f =
+   CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
+
+makeRMABuffer :: Int -> CCIEndpoint -> CCI.RMA_MODE -> IO (CStringLen, CCI.RMALocalHandle)
+makeRMABuffer rmasize endpoint mode = 
+  do cstr <- allocCStringLen rmasize -- TODO cache registered buffers
+     localh <- CCI.rmaRegister (cciEndpoint endpoint) cstr mode
+     return (cstr,localh)
+
+freeRMABuffer :: CCIEndpoint -> (CStringLen,CCI.RMALocalHandle) -> IO ()
+freeRMABuffer _ (cstr, lhandle) =
+   do -- CCI.rmaDeregister (cciEndpoint endpoint) lhandle -- TODO segfaults
+      freeCStringLen cstr
 
 sendSimple :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendSimple conn bs wp = 
@@ -519,16 +697,6 @@ translateReliability :: Reliability -> CCI.ConnectionAttributes
 translateReliability ReliableOrdered = CCI.CONN_ATTR_RO
 translateReliability ReliableUnordered = CCI.CONN_ATTR_RU
 translateReliability Unreliable = CCI.CONN_ATTR_UU
-
-{-
-getEventConnect :: CCI.EventData s -> IO CCI.Connection
-getEventConnect evd = 
-  case evd of -- TODO more precise translation of CCI.Status to real messages
-    CCI.EvConnect _ctx (Right conn) -> return conn
-    CCI.EvConnect _ctx (Left err) -> 
-         throwIO (TransportError ConnectFailed $ "Transport closed " ++ show err)
-    _ -> throwIO (TransportError ConnectFailed "Transport closed")
--}
 
 receiveEvent :: CCITransport -> CCIEndpoint -> 
                 (forall s. CCI.EventData s -> IO a) -> 

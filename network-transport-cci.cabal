@@ -20,15 +20,15 @@ Library
                    data-accessor >= 0.2 && < 0.3,
                    containers >= 0.4 && < 0.6,
                    bytestring >= 0.9 && < 0.11,
-                   cci >= 0.2.0, binary
+                   cci >= 0.2.0, binary, deepseq
   Exposed-modules: Network.Transport.CCI
-  Extensions:      DeriveDataTypeable, Rank2Types, BangPatterns
+  Extensions:      DeriveDataTypeable, Rank2Types
   ghc-options:     -Wall -fno-warn-unused-do-bind
   HS-Source-Dirs:  src
 
 
-Executable CCITest
-  main-is: tests/CCITest.hs
+Executable CCITest2
+  main-is: tests/CCITest2.hs
   ghc-options: -O -Wall -idist/build
   build-depends: base, bytestring, cci, binary, containers
 
@@ -65,4 +65,27 @@ Test-Suite TestCH
   ghc-options:       -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind 
   HS-Source-Dirs:    tests src
 
+Test-Suite TestCCI
+  Type:            exitcode-stdio-1.0
+  Main-Is:         TestCCI.hs
+  Build-Depends:   base >= 4.3 && < 5,
+                   network-transport >= 0.2 && < 0.3,
+                   data-accessor >= 0.2 && < 0.3,
+                   containers >= 0.4 && < 0.6,
+                   bytestring >= 0.9 && < 0.11,
+                   cci, binary >= 0.5 && < 0.6,
+                   random >= 1.0 && < 1.1,distributed-process,
+                   ansi-terminal >= 0.5 && < 0.6,
+                   mtl >= 2.0 && < 2.2
+  Other-modules:   TestAuxiliary,
+                   TestTransport,
+                   Traced
+  ghc-options:     -Wall -fno-warn-unused-do-bind -threaded -rtsopts -with-rtsopts=-N
+  Extensions:      ExistentialQuantification,
+                   FlexibleInstances,
+                   DeriveDataTypeable,
+                   RankNTypes,
+                   OverlappingInstances,
+                   CPP
+  HS-Source-Dirs:  tests src
 
