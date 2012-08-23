@@ -20,7 +20,7 @@ Library
                    data-accessor >= 0.2 && < 0.3,
                    containers >= 0.4 && < 0.6,
                    bytestring >= 0.9 && < 0.11,
-                   cci >= 0.2.0, binary, deepseq
+                   cci >= 0.2.0, binary >= 0.5
   Exposed-modules: Network.Transport.CCI
   Extensions:      DeriveDataTypeable, Rank2Types
   ghc-options:     -Wall -fno-warn-unused-do-bind

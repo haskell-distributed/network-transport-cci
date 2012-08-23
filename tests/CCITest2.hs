@@ -81,7 +81,7 @@ main = withCCI go
    where go = do args <- getArgs
                  case args of
                    [] -> do ep <- makeEndpoint
-                            endpointURI (meEndpoint ep) >>= putStrLn
+                            getEndpt_URI (meEndpoint ep) >>= putStrLn
                             threadDelay 500000000
                    [addr] -> do ep <- makeEndpoint
                                 conn <- connectTo ep addr

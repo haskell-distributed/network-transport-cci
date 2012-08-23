@@ -16,7 +16,7 @@ import Control.Monad (liftM, forM_, when)
 import Control.Concurrent.Chan
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.MVar
-import Control.Exception (catch, try, SomeException, throw, throwIO, Exception, finally)
+import Control.Exception (catch, bracketOnError, try, SomeException, throw, throwIO, Exception, finally)
 import Data.Binary (Binary,put,get,getWord8, putWord8, encode,decode)
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
@@ -31,7 +31,7 @@ import Prelude hiding (catch)
 import qualified Data.ByteString.Char8 as BSC (packCStringLen, concat, useAsCStringLen, head, tail, singleton,pack, unpack, empty, length)
 import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
 import qualified Data.Map as Map
-import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), endpointURI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connectionMaxSendSize, sendv, SEND_FLAG(..), disconnect, EndpointOption(..), setEndpointOpt)
+import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendv, SEND_FLAG(..), disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
 import System.Posix.Types (Fd)
 
 -- TODO: carefully read tests from distributed-process and network-transport-tcp, implement here
@@ -40,7 +40,12 @@ import System.Posix.Types (Fd)
 -- TODO: use Transport.ErrorEvent (esp. ConnectionLost) in response to bogus requests; throw $ userError when shutting down transport or endpoint
 -- TODO: handle unexpected termination eventloop by closing transport and reporting error to CH
 -- TODO reduce excessive copying when transmitting RMA buffers
+-- TODO: test UU/RU mode
+-- CCI explodes after about 1000 connections; should I use virtual connections, as the TCP version does?
+-- TODO add exception handling todo CCI's eventHandler, make sure that thrown exceptions kill the endpoint cleanly, and notify CH
 
+
+-- | Arguments given to createTransport
 data CCIParameters = CCIParameters {
         -- | How long to wait, in microseconds, before deciding that an attempt
         -- to connect to a nonresponsive foreign host has failed
@@ -53,7 +58,9 @@ data CCIParameters = CCIParameters {
 
         -- | Which device to use. Nothing (the default) means use the default device. 
         -- Other values can be retrieved from Network.CCI.getDevcices
-        cciDevice :: Maybe CCI.Device
+        cciDevice :: Maybe CCI.Device,
+
+        cciMaxRMABuffer :: Word64
      } --TODO add an authorization key to be sent during connecting
 
 data ReceiveStrategy = 
@@ -74,8 +81,9 @@ data CCITransport = CCITransport {
 defaultCCIParameters :: CCIParameters 
 defaultCCIParameters = CCIParameters {
         cciConnectionTimeout = Just 10000000, -- ^ 10 second connection timeout
-        cciReceiveStrategy =  AlwaysPoll,
-        cciDevice = Nothing -- ^ default device (as determined by driver)
+        cciReceiveStrategy = AlwaysPoll,
+        cciDevice = Nothing, -- ^ default device (as determined by driver)
+        cciMaxRMABuffer = 4194304
      }
 
 data CCIEndpoint = CCIEndpoint
@@ -85,6 +93,7 @@ data CCIEndpoint = CCIEndpoint
       cciChannel :: Chan Event,
       cciUri :: String,
       cciTransportEndpoint :: EndPoint,
+      cciRMAAlignments :: CCI.RMAAlignments,
       cciEndpointState :: MVar CCIEndpointState,
       cciEndpointFinalized :: MVar ()
    }
@@ -102,7 +111,7 @@ data CCIEndpointState = CCIEndpointValid {
 data CCIRMAState = CCIRMAState {
         cciRMARemoteHandle :: MVar (CCI.RMARemoteHandle,RMATransferId),
         cciOutstandingChunks :: Int,
-        cciRMAComplete :: MVar ()
+        cciRMAComplete :: MVar CCI.Status
      }
 
 data CCIConnection = CCIConnection
@@ -217,8 +226,9 @@ apiNewEndPoint :: CCITransport -> IO (Either (TransportError NewEndPointErrorCod
 apiNewEndPoint transport = 
   try $ mapCCIException (translateException NewEndPointFailed) $
     do (endpoint, fd) <- makeEndpoint  (cciDevice (cciParameters transport))
-       CCI.setEndpointOpt endpoint CCI.OPT_ENDPT_KEEPALIVE_TIMEOUT 5000000 -- TODO WTF?
-       uri <- CCI.endpointURI endpoint
+       CCI.setEndpt_KeepAliveTimeout endpoint 5000000 -- TODO broken
+       uri <- CCI.getEndpt_URI endpoint
+       align <- CCI.getEndpt_RMAAlign endpoint -- TODO broken
        chan <- newChan
        thrdsem <- newEmptyMVar
        thrd <- forkIO (endpointHandler thrdsem)
@@ -238,6 +248,7 @@ apiNewEndPoint transport =
                         cciEndpoint = endpoint,
                         cciChannel = chan,
                         cciUri = uri,
+                        cciRMAAlignments = align,
                         cciTransportEndpoint = transportEndPoint,
                         cciEndpointState = endpstate,
                         cciEndpointFinalized = finalized }
@@ -280,7 +291,7 @@ endpointHandler mv =
 
 allocCStringLen :: Int -> IO CStringLen
 allocCStringLen size = 
-   do buf <- Alloc.mallocBytes size
+   do buf <- Alloc.mallocBytes size -- TODO this should be aligned (to something)
       return (buf, size)
 
 freeCStringLen :: CStringLen -> IO ()
@@ -320,12 +331,12 @@ endpointLoop transport endpoint =
                             [] -> do CCI.accept sev (toEnum nextConnectionId)
                                      return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                             shutdown | shutdown == magicEndpointShutdown ->
-                                  do CCI.reject sev
+                                  do CCI.reject sev -- TODO deallocate outstanding RMA buffers
                                      return Nothing 
                             _ ->  do dbg "Unknown connection magic word"
                                      CCI.reject sev
                                      return $ Just epls
-                  CCI.EvSend ctx _status _conn ->
+                  CCI.EvSend ctx status _conn ->
                       case ctx of
                          0 -> return () -- ordinary send confirmation
                          rmaid -> withMVar (cciEndpointState endpoint) $ \st -> -- TODO check status flag, possibly return error value
@@ -333,7 +344,7 @@ endpointLoop transport endpoint =
                                        CCIEndpointValid {cciRMAState = rmaState} ->
                                           case Map.lookup (fromEnum rmaid) rmaState of
                                              Nothing -> dbg "Bogus RMA ID"
-                                             Just rmas -> putMVar (cciRMAComplete rmas) ()
+                                             Just rmas -> putMVar (cciRMAComplete rmas) status
                                        _ -> dbg "Endpoint already dead" 
                         >> (return $ Just epls)
                   CCI.EvRecv eb conn -> 
@@ -386,17 +397,18 @@ endpointLoop transport endpoint =
                                               >> (return $ Just epls {eplsTransfers = Map.delete remoteid transfers})
                   CCI.EvConnect connectionId (Left status) ->
 -- TODO: change connection state to error/invalid/closed
-                      do modifyMVar_ (cciEndpointState endpoint) $ \st ->
+                      do statusMsg <- CCI.strError (Just $ cciEndpoint endpoint) status
+                         let errmsg = TransportError ConnectNotFound ("Connection "++show connectionId++" failed because "++statusMsg)
+                         modifyMVar_ (cciEndpointState endpoint) $ \st ->
                            case st of
                              CCIEndpointValid {cciConnectionsById = connections} ->
                                let theconn = Map.lookup (fromEnum connectionId) connections -- this conversion (WordPtr to ConnectionId) is probably okay
                                    newmap = Map.delete (fromEnum connectionId) connections 
-                                in maybe (return ()) (\tc -> putMVar (cciReady tc) 
-                                       (Just $ TransportError ConnectNotFound ("Failed connection unknown: "++show connectionId))) theconn >>
+                                in maybe (dbg $ "Connection " ++ show connectionId ++ " failed because " ++ statusMsg) 
+                                         (\tc -> putMVar (cciReady tc) (Just $ errmsg)) 
+                                         theconn >>
                                    return (st {cciConnectionsById = newmap})
                              _ -> return (st)
-                         statusMsg <- CCI.strError (Just $ cciEndpoint endpoint) status
-                         dbg $ "Connection " ++ show connectionId ++ " failed with " ++ statusMsg
                          return $ Just epls
                   CCI.EvConnect connectionId (Right conn) ->
                       do withMVar (cciEndpointState endpoint) $ \st ->
@@ -408,7 +420,7 @@ endpointLoop transport endpoint =
                                       modifyMVar (cciConnectionState cciconn) $ \connstate ->
                                         case connstate of
                                           CCIConnectionInit ->
-                                            do maxmsg <- CCI.connectionMaxSendSize conn
+                                            do let maxmsg = CCI.connMaxSendSize conn
                                                let newconnstate = CCIConnectionConnected 
                                                      {cciConnection = conn, 
                                                       cciMaxSendSize = maxmsg}
@@ -430,11 +442,12 @@ endpointLoop transport endpoint =
                       let newmap = Map.insert conn (fromEnum connectionId) connectionsByConnection
                        in return $ Just epls {eplsConnectionsByConnection = newmap}
                   CCI.EvKeepAliveTimedOut _conn ->
-                     do dbg $ show ev -- TODO another endpoint has died: tell CH
+                     do dbg $ show ev -- TODO another endpoint has died: tell CH; to do this we need to learn the endpointaddress for the given conn
                         return $ Just epls
                   CCI.EvEndpointDeviceFailed _endp ->
                      do dbg $ show ev -- TODO this endpoint has died: tell CH
-                        putErrorEvent endpoint (Just $ getEndpointAddress endpoint) (Map.elems connectionsByConnection) "Device failed" -- TODO test me
+                        -- putErrorEvent endpoint (Just $ getEndpointAddress endpoint) (Map.elems connectionsByConnection) "Device failed"
+                        -- Should probably kill Endpoint and move EndpointState to closed
                         return $ Just epls
               case ret of
                  Nothing -> do --CCI.destroyEndpoint (cciEndpoint endpoint)  -- TODO this hangs/segfaults
@@ -613,8 +626,11 @@ sendRMA transport endpoint _conn realconn bs _ctx =
         _ -> throwIO (TransportError SendFailed "Endpoint invalid")
      let initMsg = 
            ControlMessageInitRMA {rmaSize = msgLength, rmaId = rmatid, rmaEndpointAddress = cciUri endpoint} -- remote side allocates buffer and sends back RemoteHandle, which local event handler puts into cciRMARemoteHandle
-         freeRemoteBuffer remoteid ok = sendControlMessageInside transport endpoint realconn --TODO swallow error/timeout here
+         freeRemoteBuffer remoteid ok = swallowException $ sendControlMessageInside transport endpoint realconn
                ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
+         throwStatus status = case status of
+                                CCI.SUCCESS -> return ()
+                                _ -> throwIO $ TransportError SendFailed ("EvSend reported error " ++ show status)
          sendInitMsg = sendControlMessageInside transport endpoint realconn initMsg
          eraseRmaState = modifyMVar_ (cciEndpointState endpoint) (\st -> return st {cciRMAState = Map.delete rmatid (cciRMAState st)})
          maybeTimeout = fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
@@ -622,18 +638,21 @@ sendRMA transport endpoint _conn realconn bs _ctx =
          getRemoteHandle = timeoutMaybe maybeTimeout err $
                                 do sendInitMsg
                                    takeMVar (cciRMARemoteHandle rmastate)
-         doRMA = do (remoteh, remoteid) <- getRemoteHandle -- TODO or we can get failure here -- abort
-                    withRMABuffer endpoint allbs CCI.RMA_READ  $ \localh -> -- TODO if this throws, freeRemoteBuffer False
-                          let chunksAndFlags = reverse (zip (reverse chunks) ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT]))
-                           in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts) -> 
-                                   CCI.rmaWrite realconn Nothing remoteh (toEnum buffOffset) localh (toEnum buffOffset) (toEnum buffLength) 
-                                   (toEnum rmatid::WordPtr) opts
-                                 takeMVar (cciRMAComplete rmastate)  -- TODO check failure from EvSend
-                    freeRemoteBuffer remoteid True -- TODO if the CCI people fix send confirmations, this won't be necessary: the framework will send a receipt notice to the receiving side
-     doRMA `finally` eraseRmaState
+         doRMA = bracketOnError 
+                    getRemoteHandle
+                    (\(_, remoteid) -> freeRemoteBuffer remoteid False)
+                    (\(remoteh, remoteid) ->
+                       do withRMABuffer endpoint allbs CCI.RMA_READ $ \localh ->
+                            let chunksAndFlags = reverse (zip (reverse chunks) ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT]))
+                             in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts) -> 
+                                     CCI.rmaWrite realconn Nothing remoteh (toEnum buffOffset) localh (toEnum buffOffset) (toEnum buffLength) 
+                                     (toEnum rmatid::WordPtr) opts
+                                   takeMVar (cciRMAComplete rmastate) >>= throwStatus
+                          freeRemoteBuffer remoteid True) -- TODO if the CCI people fix send confirmations, this won't be necessary: the framework will send a receipt notice to the receiving side
+     doRMA `finally` eraseRmaState -- TODO probably shold mask exceptions here
          where allbs = BSC.concat bs
                msgLength = BSC.length allbs
-               chunkSize = msgLength --2048 -- it seems that it isn't necessary to perform mutliple rmaWrites after all
+               chunkSize = msgLength -- cciMaxRMABuffer (cciParameters transport) -- TODO test this: I believe that the destination offset parameter of cciWrite is ignored, so transfers over this limit (by default 4MB) will break; furthermore, the chunkSize should not exceed the maximum size returned by CCI's CCI_OPT_ENDPT_RMA_ALIGN option
                (fullchunks,partialchunk) = msgLength `divMod` chunkSize
                chunks = take fullchunks ([ (offsets,chunkSize) | offsets<-[0,chunkSize..]]) 
                            ++ maybePartialChunk
@@ -644,12 +663,12 @@ sendRMA transport endpoint _conn realconn bs _ctx =
 -- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time
 withRMABuffer :: CCIEndpoint -> ByteString -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
 withRMABuffer endpoint bs mode f =
-   BSC.useAsCStringLen bs $ \cstr ->
+   BSC.useAsCStringLen bs $ \cstr -> -- TODO this buffer should be aligned (to something)
        CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
 
 makeRMABuffer :: Int -> CCIEndpoint -> CCI.RMA_MODE -> IO (CStringLen, CCI.RMALocalHandle)
 makeRMABuffer rmasize endpoint mode = 
-  do cstr <- allocCStringLen rmasize -- TODO cache registered buffers
+  do cstr <- allocCStringLen rmasize -- TODO cache registered buffers      TODO this buffer should be aligned on a 4096 boundary
      localh <- CCI.rmaRegister (cciEndpoint endpoint) cstr mode
      return (cstr,localh)
 
