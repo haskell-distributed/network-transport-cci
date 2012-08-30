@@ -31,7 +31,7 @@ import Prelude hiding (catch)
 import qualified Data.ByteString.Char8 as BSC (packCStringLen, concat, useAsCStringLen, head, tail, singleton,pack, unpack, empty, length)
 import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
 import qualified Data.Map as Map
-import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendv, SEND_FLAG(..), disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
+import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendvSilent, disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
 import System.Posix.Types (Fd)
 
 -- TODO: carefully read tests from distributed-process and network-transport-tcp, implement here
@@ -43,6 +43,7 @@ import System.Posix.Types (Fd)
 -- TODO: test UU/RU mode
 -- CCI explodes after about 1000 connections; should I use virtual connections, as the TCP version does?
 -- TODO add exception handling todo CCI's eventHandler, make sure that thrown exceptions kill the endpoint cleanly, and notify CH
+-- TODO avoid copying by using sendNoCopy and unsafeUseAsCStringLen
 
 
 -- | Arguments given to createTransport
@@ -679,7 +680,7 @@ freeRMABuffer _ (cstr, lhandle) =
 
 sendSimple :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendSimple conn bs wp = 
-     CCI.sendv conn bs wp [CCI.SEND_SILENT]
+     CCI.sendvSilent conn bs wp
 
 -- | CCI.disconnect is a local operation; it doesn't notify the other side, so we have to. We send a control
 -- message to the other side, which unregisters and disconnects the remote endpoint, then do the same here

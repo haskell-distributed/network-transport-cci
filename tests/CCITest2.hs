@@ -74,7 +74,7 @@ connectTo ep1 ep2 =
      takeMVar (meConnection ep1) >>= maybe (error "Connection rejected") return
 
 sendStuff :: Connection -> ByteString -> IO ()
-sendStuff conn bs = send conn bs (0::WordPtr) []
+sendStuff conn bs = send conn bs (0::WordPtr)
 
 main :: IO ()
 main = withCCI go
