@@ -12,6 +12,7 @@ module Network.Transport.CCI
      ReceiveStrategy(..)
   ) where
 
+import Control.Applicative ((<*>),pure)
 import Control.Monad (liftM, forM_, when)
 import Control.Concurrent.Chan
 import Data.Maybe (catMaybes)
@@ -35,6 +36,8 @@ import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
 import qualified Data.Map as Map
 import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendvSilent, disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
 import System.Posix.Types (Fd)
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import qualified Network.Transport.CCI.Pool as Pool
 
 -- TODO: wait for ORNL to implement keepalive timeout, extend CCIParameters to support other endpoint options
 -- TODO: use CCI.strError to display better exceptions
@@ -60,6 +63,11 @@ data CCIParameters = CCIParameters {
         -- Other values can be retrieved from Network.CCI.getDevcices
         cciDevice :: Maybe CCI.Device,
 
+        -- | The maximum number of available RMA buffers that the layer
+        -- permits before it starts releasing them
+        cciOutstandingRMABuffers  :: Int,
+
+        -- | The largest quantity of data to be sent in a single RMA chunk.
         cciMaxRMABuffer :: Word32
      } --TODO add an authorization key to be sent during connecting
 
@@ -83,6 +91,7 @@ defaultCCIParameters = CCIParameters {
         cciConnectionTimeout = Just 10000000, -- ^ 10 second connection timeout
         cciReceiveStrategy = AlwaysPoll,
         cciDevice = Nothing, -- ^ default device (as determined by driver)
+        cciOutstandingRMABuffers = 10,
         cciMaxRMABuffer = 4194304
      }
 
@@ -251,7 +260,7 @@ apiNewEndPoint transport =
                         cciRMAAlignments = align,
                         cciTransportEndpoint = transportEndPoint,
                         cciEndpointState = endpstate,
-                        cciEndpointFinalized = finalized }
+                        cciEndpointFinalized = finalized}
                       transportEndPoint = EndPoint {
                         receive = readChan chan,
                         address = EndPointAddress $ BSC.pack uri,
@@ -302,24 +311,33 @@ data EndpointLoopState = EndpointLoopState
        eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId,
        eplsNextConnectionId :: !ConnectionId,
        eplsNextTransferId :: !RMATransferId,
-       eplsTransfers :: Map.Map RMATransferId (CCI.RMALocalHandle, CStringLen) -- TODO IntMap
+       eplsTransfers :: Map.Map RMATransferId Pool.Buffer, -- TODO IntMap
+       eplsPool :: Pool.Pool
     }
 
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
 endpointLoop transport endpoint =
- let newEpls = EndpointLoopState {eplsNextConnectionId = 0, 
+ let mostRestrictiveAlignment align = maximum $ [CCI.rmaWriteLocalAddr,CCI.rmaWriteRemoteAddr, 
+                                                CCI.rmaReadLocalAddr,CCI.rmaReadRemoteAddr] <*> pure align
+     newEpls = EndpointLoopState {eplsNextConnectionId = 0, 
                                   eplsConnectionsByConnection = Map.empty,
                                   eplsNextTransferId = 0,
-                                  eplsTransfers = Map.empty}
+                                  eplsTransfers = Map.empty,
+                                  eplsPool = Pool.newPool (cciEndpoint endpoint) 
+                                                (fromEnum $ mostRestrictiveAlignment (cciRMAAlignments endpoint))
+                                                (cciOutstandingRMABuffers $ cciParameters transport) CCI.RMA_WRITE }
      loop :: EndpointLoopState -> IO ()
      loop epls = 
        case epls of 
          EndpointLoopState {eplsNextConnectionId = nextConnectionId,
                             eplsConnectionsByConnection = connectionsByConnection,
                             eplsNextTransferId = nextTransferId,
-                            eplsTransfers = transfers} ->
+                            eplsTransfers = transfers,
+                            eplsPool = pool} ->
            do ret <- receiveEvent transport endpoint $ \ev -> 
                 case ev of
+        
+
 
 -- | The connection packet will be blank, in which case this is a real
 -- connection request, orit can contain magicEndpointShutdown,
@@ -331,7 +349,8 @@ endpointLoop transport endpoint =
                             [] -> do CCI.accept sev (toEnum nextConnectionId)
                                      return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                             shutdown | shutdown == magicEndpointShutdown ->
-                                  do CCI.reject sev -- TODO deallocate outstanding RMA buffers
+                                  do CCI.reject sev -- TODO deallocate outstanding RMA buffers, from Pool
+                                     Pool.freePool pool
                                      return Nothing 
                             _ ->  do dbg "Unknown connection magic word"
                                      CCI.reject sev
@@ -370,14 +389,15 @@ endpointLoop transport endpoint =
                                                 return $ Just epls {eplsConnectionsByConnection = Map.delete conn connectionsByConnection}
                                           ControlMessageInitRMA {rmaSize=rmasize, 
                                                                  rmaId=orginatingId} -> -- TODO error handling, if allocaiton fails sends a NACK
-                                             do (cstr, localh) <- makeRMABuffer rmasize endpoint CCI.RMA_WRITE
+                                             do (newpool, buffer) <- Pool.getBuffer pool (Left rmasize)
                                                 let notify = ControlMessageAckInitRMA
                                                            {rmaAckOrginatingId=orginatingId,
                                                             rmaAckRemoteId = nextTransferId, 
-                                                            rmaAckRemoteHandle = CCI.rmaHandle2ByteString localh}
+                                                            rmaAckRemoteHandle = CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer)}
                                                 sendControlMessageInside transport endpoint conn notify
                                                 return $ Just epls {eplsNextTransferId = nextTransferId+1,
-                                                                    eplsTransfers = Map.insert nextTransferId (localh, cstr) transfers}
+                                                                    eplsTransfers = Map.insert nextTransferId buffer transfers,
+                                                                    eplsPool = newpool}
                                           ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
                                                             rmaAckRemoteId = remoteId, 
                                                             rmaAckRemoteHandle = bs} -> -- TODO error handling
@@ -393,13 +413,14 @@ endpointLoop transport endpoint =
                                                   >> (return $ Just epls)
                                           ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid} ->
                                              case Map.lookup remoteid transfers of
-                                               Nothing -> dbg "Bogus transfer id"
-                                               Just (lhandle, cstr) -> 
+                                               Nothing -> dbg "Bogus transfer id" >> return (Just epls)
+                                               Just buffer -> 
                                                    do when ok $ 
-                                                         do buffermsg <- BSC.packCStringLen cstr
+                                                         do buffermsg <- Pool.getByteString buffer
                                                             putEvent endpoint (Received connid [buffermsg])
-                                                      freeRMABuffer endpoint (cstr,lhandle) 
-                                              >> (return $ Just epls {eplsTransfers = Map.delete remoteid transfers})
+                                                      newpool <- Pool.releaseBuffer pool buffer
+                                                      return $ Just epls {eplsTransfers = Map.delete remoteid transfers,
+                                                                      eplsPool = newpool}
                                   _ -> dbg "Unknown message type" >> (return $ Just epls)
                   CCI.EvConnect connectionId (Left status) ->
 -- TODO: change connection state to error/invalid/closed
@@ -611,25 +632,7 @@ sendCore transport endpoint conn context isCtrlMsg bs =
 -- 7. The other side copies its buffers to a message, sends it to CH, and frees its buffers
 sendRMA :: CCITransport -> CCIEndpoint -> CCIConnection -> CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendRMA transport endpoint _conn realconn bs _ctx = 
-  do (rmatid,rmastate) <- modifyMVar (cciEndpointState endpoint) $ \st ->
-       case st of
-        CCIEndpointValid 
-          {cciRMANextTransferId=nextTransferId,
-           cciRMAState=rmaState} -> 
-             let tid = case nextTransferId of
-                         0 -> nextTransferId + 1 -- Skip over ID zero, since context 0 is used for regular messages
-                         _ -> nextTransferId
-              in do rmaRemoteHandle <- newEmptyMVar
-                    rmaComplete <- newEmptyMVar
-                    let myRmaState = CCIRMAState
-                                       {
-                                          cciRMARemoteHandle = rmaRemoteHandle,
-                                          cciRMAComplete = rmaComplete,
-                                          cciOutstandingChunks = length chunks
-                                       }
-                    return (st {cciRMANextTransferId=tid+1,
-                             cciRMAState=Map.insert tid myRmaState rmaState},(tid,myRmaState))
-        _ -> throwIO (TransportError SendFailed "Endpoint invalid")
+  do (rmatid,rmastate) <- newRMA endpoint
      let -- Tell the remote side, if we can, to free the buffer corresponding to the given ID.
          -- If ok, then the buffer should be complete, create a message from it. Otherwise,
          -- throw it away.
@@ -686,7 +689,27 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                  -- the buffer. If we get an error from sending, throw.
                                  takeMVar (cciRMAComplete rmastate) >>= throwStatus)
      doRMA `finally` eraseRmaState -- TODO probably shold mask exceptions here
-        where  throwStatus status = 
+        where  newRMA endpoint = 
+                 modifyMVar (cciEndpointState endpoint) $ \st ->
+                   case st of
+                     CCIEndpointValid 
+                        {cciRMANextTransferId=nextTransferId,
+                         cciRMAState=rmaState} -> 
+                           let tid = case nextTransferId of
+                                       0 -> nextTransferId + 1 -- Skip over ID zero, since context 0 is used for regular messages
+                                       _ -> nextTransferId
+                            in do rmaRemoteHandle <- newEmptyMVar
+                                  rmaComplete <- newEmptyMVar
+                                  let myRmaState = CCIRMAState
+                                       {
+                                          cciRMARemoteHandle = rmaRemoteHandle,
+                                          cciRMAComplete = rmaComplete,
+                                          cciOutstandingChunks = length chunks
+                                       }
+                                  return (st {cciRMANextTransferId=tid+1,
+                                              cciRMAState=Map.insert tid myRmaState rmaState},(tid,myRmaState))
+                     _ -> throwIO (TransportError SendFailed "Endpoint invalid") 
+               throwStatus status = 
                  case status of
                     CCI.SUCCESS -> return ()
                     _ -> throwIO $ TransportError SendFailed ("EvSend reported error " ++ show status)
@@ -720,19 +743,8 @@ sendRMA transport endpoint _conn realconn bs _ctx =
 -- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time
 withRMABuffer :: CCIEndpoint -> ByteString -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
 withRMABuffer endpoint bs mode f =
-   BSC.useAsCStringLen bs $ \cstr -> -- TODO this buffer should be aligned (to something)
+   unsafeUseAsCStringLen bs $ \cstr -> -- TODO this buffer should be aligned (to something)
        CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
-
-makeRMABuffer :: Int -> CCIEndpoint -> CCI.RMA_MODE -> IO (CStringLen, CCI.RMALocalHandle)
-makeRMABuffer rmasize endpoint mode = 
-  do cstr <- allocCStringLen rmasize -- TODO cache registered buffers      TODO this buffer should be aligned on a 4096 boundary
-     localh <- CCI.rmaRegister (cciEndpoint endpoint) cstr mode
-     return (cstr,localh)
-
-freeRMABuffer :: CCIEndpoint -> (CStringLen,CCI.RMALocalHandle) -> IO ()
-freeRMABuffer endpoint (cstr, lhandle) =
-   do -- CCI.rmaDeregister (cciEndpoint endpoint) lhandle -- TODO segfaults
-      freeCStringLen cstr
 
 sendSimple :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendSimple conn bs wp = 

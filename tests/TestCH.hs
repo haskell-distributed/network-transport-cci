@@ -15,7 +15,7 @@ import Control.Concurrent.MVar
   , takeMVar
   , readMVar
   )
-import Control.Monad (replicateM_, replicateM)
+import Control.Monad (replicateM_, replicateM, mapM, mapM_)
 import Control.Exception (throwIO,SomeException, throwTo)
 import Control.Applicative ((<$>), (<*>))
 import qualified Network.Transport as NT (Transport, closeEndPoint)
@@ -59,8 +59,8 @@ bigPing = do
   bigPing
 
 -- | Basic big ping test
-testBigPing :: NT.Transport -> Bool -> Int -> Int -> IO ()
-testBigPing transport concurrent numPings pingSize = do
+testBigPing :: NT.Transport -> Bool -> [Int] -> IO ()
+testBigPing transport concurrent pingSize = do
   serverAddr <- newEmptyMVar
   clientDone <- newEmptyMVar
 
@@ -78,19 +78,20 @@ testBigPing transport concurrent numPings pingSize = do
     tryRunProcess localNode $ do
       case concurrent of
         False -> 
-         replicateM_ numPings $ pinger pingServer
-        True -> do procs <- replicateM numPings $ do rv <- liftIO $ newEmptyMVar
-                                                     spawnLocal $ do pinger pingServer
+         flip mapM_ pingSize $ \size -> pinger pingServer size
+        True -> do procs <- flip mapM pingSize $ \size -> 
+                                                  do rv <- liftIO $ newEmptyMVar
+                                                     spawnLocal $ do pinger pingServer size
                                                                      liftIO $ putMVar rv ()
                                                      return rv
-                   liftIO $ forM_ procs takeMVar
+                   liftIO $ flip mapM_ procs takeMVar
                    
 
     putMVar clientDone ()
 
   takeMVar clientDone
     where 
-          pinger pingServer = 
+          pinger pingServer pingSize = 
               do pid <- getSelfPid
                  send pingServer (BigPong pid (replicate pingSize '!'))
                  BigPing _ _ <- expect
@@ -650,9 +651,11 @@ main = do
 -- previously: createTransport "127.0.0.1" "8080" defaultTCPParameters 
   runTests 
     [ ("Ping",             testPing             transport)
-    , ("BigPing",          testBigPing          transport False 1000 10000)
-    , ("VeryBigPing",      testBigPing          transport False 10   1000000)
-    , ("ConcurrentBigPing",testBigPing          transport True  100  10000)
+    , ("BigPing",          testBigPing          transport False (replicate 1000 10000))
+    , ("BigPingAsc",       testBigPing          transport False (take 400 $ cycle [4000, 6000.. 50000]))
+    , ("BigPingDec",       testBigPing          transport False (take 400 $ cycle $ reverse [4000, 6000.. 50000]))
+    , ("VeryBigPing",      testBigPing          transport False (replicate 10   1000000))
+    , ("ConcurrentBigPing",testBigPing          transport True  (replicate 100  10000))
     , ("Math",             testMath             transport) 
     , ("Timeout",          testTimeout          transport)
     , ("Timeout0",         testTimeout0         transport)
