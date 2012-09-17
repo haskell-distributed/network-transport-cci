@@ -40,7 +40,7 @@ client :: Endpoint -> String -> MVar () -> IO ()
 client endpoint addr clientDone = catch  loop  handler where
 
            handler :: SomeException -> IO ()
-           handler e = putStrLn ( "Exception in echoServer " ++ show e ) >> throw e 
+           handler e = putStrLn ( "Exception in Client " ++ show e ) >> putMVar clientDone () >> throw e 
 
            loop  =  do 
                 connect endpoint  addr  BS.empty CONN_ATTR_RO ( 0::WordPtr ) Nothing
@@ -88,20 +88,20 @@ client endpoint addr clientDone = catch  loop  handler where
                 
 
 echoServer :: Endpoint -> MVar ()  -> IO ()
-echoServer endpoint serverDone = catch ( loop M.empty  ) handler where 
+echoServer endpoint serverDone = catch  loop  handler where 
            handler :: SomeException -> IO ()
-           handler e = putStrLn ( "Exception in echoServer " ++ show e ) >> throw e 
+           handler e = putStrLn ( "Exception in echoServer " ++ show e ) >> putMVar serverDone () >> throw e 
 
-           loop cs = do 
+           loop  = do 
                evnt <- getEvent endpoint
                case evnt of 
-                     Nothing -> loop cs 
+                     Nothing -> loop  
                      Just s -> do 
                           ev <- getEventData s 
                           case ev of 
                               EvSend wordPtr status connection -> do 
                                       putStrLn $ "I am in EvSend " ++ show wordPtr ++ " " ++ show status ++ " " ++ show connection 
-                                      loop cs
+                                      loop 
 
                               EvRecv eventbytes  connection -> do 
                                      forkIO $ do 
@@ -109,36 +109,33 @@ echoServer endpoint serverDone = catch ( loop M.empty  ) handler where
                                         msg <- packEventBytes eventbytes
                                         BS.putStrLn msg
                                         send connection ( BS.pack "Hi Client. How are you ? " ) ( 0::WordPtr ) 
-                                     loop cs
+                                     loop 
 
                               EvConnect wordPtr ( Left status ) -> do 
                                       putStrLn $ "I am in EvConnect with status " ++ show wordPtr ++ " " ++ show status
-                                      loop cs 
+                                      loop 
 
                               EvConnect wordPtr ( Right connection ) -> do 
                                       putStrLn $ "I am in EvConnect with connection "  ++ show wordPtr ++ " " ++ show connection
-                                      loop cs
+                                      loop
 
                               EvAccept wordPtr ( Right connection ) -> do 
-                                      newconnMVar <- newEmptyMVar 
-                                      forkIO $ do
                                         putStrLn $ "I am in EvAccept "  ++ show wordPtr ++ " " ++ show connection
-                                        putMVar newconnMVar connection
-                                      loop ( M.insert wordPtr newconnMVar cs ) 
+                                        loop 
 
                               EvConnectRequest sev  eb  attr -> do
                                       forkIO $ do 
                                         putStrLn $  "I am in EvConnectRequest " ++ show sev ++ " " ++ show eb ++ " " ++ show attr
                                         accept sev ( 0 :: WordPtr )
-                                      loop cs 
+                                      loop 
 
                               EvKeepAliveTimedOut connection -> do
                                       putStrLn $ "I am in EvKeepAliveTimedOut " ++ show connection
-                                      loop cs
+                                      loop
 
                               EvEndpointDeviceFailed endpt -> do
                                       putStrLn $ "I am in EvEndPointDeviceFailed " ++ show endpt
-                                      loop cs
+                                      loop 
                           threadDelay 50000000
                           putMVar serverDone ()			     
 
