@@ -310,8 +310,8 @@ data EndpointLoopState = EndpointLoopState
        eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId,
        eplsNextConnectionId :: !ConnectionId,
        eplsNextTransferId :: !RMATransferId,
-       eplsTransfers :: Map.Map RMATransferId Pool.Buffer, -- TODO IntMap
-       eplsPool :: Pool.Pool
+       eplsTransfers :: Map.Map RMATransferId (Pool.Buffer CCI.RMALocalHandle), -- TODO IntMap
+       eplsPool :: Pool.Pool CCI.RMALocalHandle
     }
 
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
@@ -322,9 +322,11 @@ endpointLoop transport endpoint =
                                   eplsConnectionsByConnection = Map.empty,
                                   eplsNextTransferId = 0,
                                   eplsTransfers = Map.empty,
-                                  eplsPool = Pool.newPool (cciEndpoint endpoint) 
+                                  eplsPool = Pool.newPool
                                                 (fromEnum $ mostRestrictiveAlignment (cciRMAAlignments endpoint))
-                                                (cciOutstandingRMABuffers $ cciParameters transport) CCI.RMA_WRITE }
+                                                (cciOutstandingRMABuffers $ cciParameters transport)
+                                                (\cstr -> CCI.rmaRegister (cciEndpoint endpoint) cstr CCI.RMA_WRITE)
+                                                (\lhandle -> CCI.rmaDeregister (cciEndpoint endpoint) lhandle) }
      loop :: EndpointLoopState -> IO ()
      loop epls = 
        case epls of 
@@ -691,7 +693,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                            -- we only get confirmation message for the last chunk and (b)
                            -- the confirmation message for the last chunk carries a guarantee
                            -- that all preceeding chunks have been sent.
-                           in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts,finalizer) ->
+                           in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts,finalizer) -> 
                                      CCI.rmaWrite realconn finalizer
                                                 remoteh (fromIntegral buffOffset) localh 
                                                 (fromIntegral buffOffset) (fromIntegral buffLength) 

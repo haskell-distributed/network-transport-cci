@@ -10,6 +10,8 @@ import Data.Foldable (forM_)
 import Control.Concurrent (threadDelay,ThreadId,myThreadId)
 import Control.Concurrent.MVar 
   ( MVar
+  , newMVar
+  , modifyMVar_
   , newEmptyMVar
   , putMVar
   , takeMVar
@@ -61,18 +63,21 @@ bigPing = do
 -- | Basic big ping test
 testBigPing :: NT.Transport -> Bool -> [Int] -> IO ()
 testBigPing transport concurrent pingSize = do
+  nodes <- newMVar []
   serverAddr <- newEmptyMVar
   clientDone <- newEmptyMVar
 
   -- Server
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
+    modifyMVar_ nodes (return . (:)localNode)
     addr <- forkProcess localNode bigPing
     putMVar serverAddr addr
 
   -- Client
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
+    modifyMVar_ nodes (return . (:)localNode)
     pingServer <- readMVar serverAddr
 
     tryRunProcess localNode $ do
@@ -90,6 +95,7 @@ testBigPing transport concurrent pingSize = do
     putMVar clientDone ()
 
   takeMVar clientDone
+  takeMVar nodes >>= mapM_ closeLocalNode
     where 
           pinger pingServer pingSize = 
               do pid <- getSelfPid
@@ -109,18 +115,21 @@ ping = do
 -- | Basic ping test
 testPing :: NT.Transport -> IO ()
 testPing transport = do
+  nodes <- newMVar []
   serverAddr <- newEmptyMVar
   clientDone <- newEmptyMVar
 
   -- Server
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
+    modifyMVar_ nodes (return . (:)localNode)
     addr <- forkProcess localNode ping
     putMVar serverAddr addr
 
   -- Client
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
+    modifyMVar_ nodes (return . (:)localNode)
     pingServer <- readMVar serverAddr
     let numPings = 10000
 
@@ -134,6 +143,7 @@ testPing transport = do
     putMVar clientDone ()
 
   takeMVar clientDone
+  takeMVar nodes >>= mapM_ closeLocalNode
 
 -- | Monitor or link to a remote node
 monitorOrLink :: Bool            -- ^ 'True' for monitor, 'False' for link

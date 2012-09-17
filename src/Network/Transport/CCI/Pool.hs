@@ -21,7 +21,6 @@ import Control.Exception (catch, IOException)
 import Control.Applicative ((<$>))
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Network.CCI (RMALocalHandle, RMA_MODE, rmaRegister, rmaDeregister, Endpoint)
 import Foreign.C.Types (CChar)
 import Foreign.Ptr (Ptr,alignPtr)
 import Foreign.Marshal.Alloc (mallocBytes, free)
@@ -36,52 +35,52 @@ import Data.Maybe (fromJust)
 
 type BufferId = Int
 
-data Buffer = Buffer
+data Buffer handle = Buffer
      {
         bId :: BufferId,
         bAllocStart :: Ptr CChar,
         bStart :: Ptr CChar,
         bSize :: Int,
-        bHandle :: RMALocalHandle
+        bHandle :: handle
      }
 
-data Pool = Pool
+data Pool handle = Pool
      {
         pNextId :: !BufferId,
         pMaxBufferCount :: Int,
         pAlign :: Int,
-        pMode :: RMA_MODE,
-        pEndpoint :: Endpoint,
+        pRegister :: CStringLen -> IO handle,
+        pUnregister :: handle -> IO (),
 
-        pInUse :: Map BufferId Buffer,
-        pAvailableBySize :: [Buffer],
+        pInUse :: Map BufferId (Buffer handle),
+        pAvailableBySize :: [Buffer handle],
         pAvailableLru :: [BufferId]
      }
 
-getBufferHandle :: Buffer -> RMALocalHandle
+getBufferHandle :: Buffer handle -> handle
 getBufferHandle = bHandle
 
 dbg :: String -> IO ()
 dbg = putStrLn
 
-freePool :: Pool -> IO ()
+freePool :: Pool handle -> IO ()
 freePool pool =
   let inuse = Map.elems (pInUse pool)
       notinuse = pAvailableBySize pool
    in mapM_ (destroyBuffer pool) (inuse++notinuse)
 
-newPool :: Endpoint -> Int -> Int -> RMA_MODE -> Pool
-newPool endpoint alignment maxbuffercount mode =
+newPool :: Int -> Int -> (CStringLen -> IO handle) -> (handle -> IO ()) -> Pool handle
+newPool alignment maxbuffercount reg unreg =
   Pool {pNextId=0,
         pMaxBufferCount=maxbuffercount,
         pAlign=alignment,
-        pMode = mode,
-        pEndpoint = endpoint,
+        pRegister = reg,
+        pUnregister = unreg,
         pInUse=Map.empty,
         pAvailableBySize=[],
         pAvailableLru=[]}
 
-freeBuffer :: Pool -> Buffer -> IO Pool
+freeBuffer :: Pool handle -> Buffer handle -> IO (Pool handle)
 freeBuffer pool buffer = 
   case Map.lookup (bId buffer) (pInUse pool) of
     Just buf | bSize buf == bSize buffer -> 
@@ -93,7 +92,7 @@ freeBuffer pool buffer =
         in return newpool
     _ -> dbg "Trying to free buffer that I don't know about" >> return pool
 
-cleanup :: Pool -> IO Pool
+cleanup :: Pool handle -> IO (Pool handle)
 cleanup pool =
   if (pMaxBufferCount pool < length (pAvailableLru pool)) 
      then
@@ -106,13 +105,12 @@ cleanup pool =
      else return pool 
     where byId a b = bId a == bId b
 
-destroyBuffer :: Pool -> Buffer -> IO ()
+destroyBuffer :: Pool handle -> Buffer handle -> IO ()
 destroyBuffer pool buffer =
- do rmaDeregister (pEndpoint pool) (bHandle buffer)
+ do (pUnregister pool) (bHandle buffer)
     freeAligned ((bStart buffer,bSize buffer),bAllocStart buffer)
 
-
-newBuffer :: Pool -> Either Int ByteString -> IO (Maybe (Pool, Buffer))
+newBuffer :: Pool handle -> Either Int ByteString -> IO (Maybe (Pool handle, Buffer handle))
 newBuffer pool content = 
    case findAndRemove goodSize (pAvailableBySize pool) of
       (_newavailable,Nothing) ->
@@ -124,7 +122,7 @@ newBuffer pool content =
                   Right bs ->
                     copyTo bs start
                   Left _ -> return ()
-                handle <- rmaRegister (pEndpoint pool) cstr (pMode pool)
+                handle <- (pRegister pool) cstr
                 let newbuf = 
                        Buffer {
                          bId = pNextId pool,
@@ -181,7 +179,7 @@ moveToFront x xs = go [] xs
 
 -}
 
-getBufferByteString :: Buffer -> IO ByteString
+getBufferByteString :: Buffer handle -> IO ByteString
 getBufferByteString buffer =
    BSC.packCStringLen (bStart buffer, bSize buffer)
 
