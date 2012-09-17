@@ -35,6 +35,10 @@ import Data.Maybe (fromJust)
 
 type BufferId = Int
 
+-- | A buffer, identified by a handle. With this handle,
+-- we can deallocate with 'freeBuffer', we can get its
+-- contents with 'getBufferByteString' and we can get
+-- its handle value with 'getBufferHandle'
 data Buffer handle = Buffer
      {
         bId :: BufferId,
@@ -44,6 +48,9 @@ data Buffer handle = Buffer
         bHandle :: handle
      }
 
+-- | A collection of managed buffers, parameterized by the
+-- type of the handle that is created when a buffer is
+-- registered. In CCI's case, that is RMALocalHandle.
 data Pool handle = Pool
      {
         pNextId :: !BufferId,
@@ -57,18 +64,26 @@ data Pool handle = Pool
         pAvailableLru :: [BufferId]
      }
 
+-- | Returns the handle of the given buffer
 getBufferHandle :: Buffer handle -> handle
 getBufferHandle = bHandle
 
 dbg :: String -> IO ()
 dbg = putStrLn
 
+-- | Deallocates and unregisters all buffers managed
+-- by the given pool.
 freePool :: Pool handle -> IO ()
 freePool pool =
   let inuse = Map.elems (pInUse pool)
       notinuse = pAvailableBySize pool
    in mapM_ (destroyBuffer pool) (inuse++notinuse)
 
+-- | Create a new pool. All buffers will be aligned at the
+-- given alignment (or 0 for any alignment). Allocated, but unused
+-- buffers will be harvested after the given max count. All, the
+-- user provides two functions for registering and registering
+-- handles, which are called when buffers are allocated and deallocated.
 newPool :: Int -> Int -> (CStringLen -> IO handle) -> (handle -> IO ()) -> Pool handle
 newPool alignment maxbuffercount reg unreg =
   Pool {pNextId=0,
@@ -80,6 +95,9 @@ newPool alignment maxbuffercount reg unreg =
         pAvailableBySize=[],
         pAvailableLru=[]}
 
+-- | Release the given buffer. It won't be unregistered
+-- and deallocated immediately, but simply placed on the
+-- available list.
 freeBuffer :: Pool handle -> Buffer handle -> IO (Pool handle)
 freeBuffer pool buffer = 
   case Map.lookup (bId buffer) (pInUse pool) of
@@ -110,6 +128,12 @@ destroyBuffer pool buffer =
  do (pUnregister pool) (bHandle buffer)
     freeAligned ((bStart buffer,bSize buffer),bAllocStart buffer)
 
+-- | Find an available buffer of the appropriate size, or
+-- allocate a new one if such a buffer is not already allocated.
+-- You will get back an updated pool and the buffer object.
+-- You may provide the size of the desired buffer either as an Int
+-- or as a ByteString. In the latter case, the contents of the
+-- ByteString will be copied into the buffer.
 newBuffer :: Pool handle -> Either Int ByteString -> IO (Maybe (Pool handle, Buffer handle))
 newBuffer pool content = 
    case findAndRemove goodSize (pAvailableBySize pool) of
@@ -135,7 +159,8 @@ newBuffer pool content =
                          pNextId = (pNextId pool)+1,
                          pInUse = Map.insert (bId newbuf) newbuf (pInUse pool)
                       }
-                cleanpool <- cleanup newpool
+                cleanpool <- cleanup newpool -- We remove at most unused buffer beyond the limit here.
+                                             -- We don't want to constnatly alloc/dealloc a same-sized buffer, so we go gradual.
                 return $ Just (cleanpool, newbuf)
       (newavailable,Just buf) -> 
          let newpool = pool {pAvailableBySize = newavailable,
@@ -145,7 +170,7 @@ newBuffer pool content =
                   Right bs ->
                     copyTo bs (bStart buf)
                   Left _ -> return ()
-                cleanpool <- cleanup newpool
+                cleanpool <- cleanup newpool -- We remove at most unused buffer beyond the limit here.
                 return $ Just (cleanpool, buf)
     where goodSize b = bSize b >= (neededSize content)
           neededSize (Left n) = n
@@ -179,9 +204,10 @@ moveToFront x xs = go [] xs
 
 -}
 
+-- | View the contents of the buffer as a bytestring. Currently O(n).
 getBufferByteString :: Buffer handle -> IO ByteString
 getBufferByteString buffer =
-   BSC.packCStringLen (bStart buffer, bSize buffer)
+   BSC.packCStringLen (bStart buffer, bSize buffer) -- TODO use unsafePackCStringLen, unsafePackMallocCString in Pool.getByteString? How to safely avoid copying?
 
 findAndRemove :: (a -> Bool) -> [a] -> ([a], Maybe a)
 findAndRemove f xs = go [] xs

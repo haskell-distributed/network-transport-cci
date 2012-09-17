@@ -236,7 +236,7 @@ apiNewEndPoint transport =
     do (endpoint, fd) <- makeEndpoint  (cciDevice (cciParameters transport))
        CCI.setEndpt_KeepAliveTimeout endpoint 5000000 -- TODO currently broken in CCI layer
        uri <- CCI.getEndpt_URI endpoint
-       align <- CCI.getEndpt_RMAAlign endpoint -- TODO currently broken in CCI layer
+       align <- CCI.getEndpt_RMAAlign endpoint
        chan <- newChan
        thrdsem <- newEmptyMVar
        thrd <- forkIO (endpointHandler thrdsem)
@@ -350,7 +350,7 @@ endpointLoop transport endpoint =
                             [] -> do CCI.accept sev (toEnum nextConnectionId)
                                      return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                             shutdown | shutdown == magicEndpointShutdown ->
-                                  do CCI.reject sev -- TODO deallocate outstanding RMA buffers, from Pool
+                                  do CCI.reject sev
                                      Pool.freePool pool
                                      return Nothing 
                             _ ->  do dbg "Unknown connection magic word"
@@ -389,7 +389,7 @@ endpointLoop transport endpoint =
                                                 putEvent endpoint (ConnectionClosed connid)
                                                 return $ Just epls {eplsConnectionsByConnection = Map.delete conn connectionsByConnection}
                                           ControlMessageInitRMA {rmaSize=rmasize, 
-                                                                 rmaId=orginatingId} -> -- TODO error handling, if allocaiton fails sends a NACK!!!
+                                                                 rmaId=orginatingId} ->
                                              do mres <- Pool.newBuffer pool (Left rmasize) 
                                                 case mres of
                                                   Just (newpool, buffer) ->
@@ -550,7 +550,6 @@ sendSignalByConnect transport endpoint epaddr bs =
 --   5. When the remote side gets EvAccept, it registers the new connection with its ID
 --   6. apiConnect waits for EvConnect message, after which is sends a ControlMessageInitConnection message on newly-created connection; this message contains reliability and endpoint information that is needed for the remote side to send on to CH
 --   7. Future EvReceives on the Remote side (caused by receiving a message) will result in event being placed on the remote endpoint queue
--- TODO: create shortcut connection of sending to self endpoint?
 apiConnect :: CCITransport -> CCIEndpoint -> 
               EndPointAddress -> Reliability -> 
               ConnectHints -> 
@@ -583,7 +582,7 @@ apiConnect transport endpoint remoteaddress reliability _hints =
                                       send  = apiSend transport endpoint theconn,
                                       close = apiCloseConnection transport endpoint theconn
                                     }
-                                requestConnection (fromIntegral cid) -- TODO this conversion (Int to WordPtr) is probablay okay
+                                requestConnection (fromIntegral cid) -- this conversion (Int to WordPtr) is probablay okay
                                 return (newst,((theconn,transportconn, cid)))
                      _ -> 
                          throwIO (TransportError ConnectFailed "Endpoint invalid")
@@ -703,7 +702,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                  -- CCI about the lsat chunk before it's okay to release
                                  -- the buffer. If we get an error from sending, throw.
                                  takeMVar (cciRMAComplete rmastate) >>= throwStatus)
-     doRMA `finally` eraseRmaState -- TODO probably shold mask exceptions here
+     doRMA `finally` eraseRmaState -- probably shold mask exceptions here
         where  newRMA endpoint = 
                  modifyMVar (cciEndpointState endpoint) $ \st ->
                    case st of
@@ -755,7 +754,8 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                     in genericTake fullchunks ([ (offsets,chunkSize) | offsets<-[0,chunkSize..]]) 
                            ++ maybePartialChunk
                
--- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time
+-- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time;
+-- TODO: test performance of alloc-on-demand versus copying into buffer pool
 withRMABuffer :: CCIEndpoint -> ByteString -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
 withRMABuffer endpoint bs mode f =
    unsafeUseAsCStringLen bs $ \cstr -> -- TODO this buffer should be aligned (to something)
