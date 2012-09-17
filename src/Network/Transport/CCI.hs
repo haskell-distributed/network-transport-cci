@@ -44,7 +44,7 @@ import qualified Network.Transport.CCI.Pool as Pool
 -- TODO: use Transport.ErrorEvent (esp. ConnectionLost) in response to bogus requests; throw $ userError when shutting down transport or endpoint
 -- TODO: test UU/RU mode
 -- CCI explodes after about 1000 connections; should I use virtual connections, as the TCP version does?
--- TODO add exception handling todo CCI's eventHandler, make sure that thrown exceptions kill the endpoint cleanly, and notify CH
+-- TODO add exception handling todo CCI's eventHandler, make sure that thrown exceptions kill the endpoint cleanly, and notify CH; handle out of memory errors from getBuffer elegantly
 -- TODO avoid copying RMA buffers by using sendNoCopy and unsafeUseAsCStringLen
 
 
@@ -118,7 +118,7 @@ data CCIEndpointState = CCIEndpointValid {
                         } | CCIEndpointClosed
 
 data CCIRMAState = CCIRMAState {
-        cciRMARemoteHandle :: MVar (CCI.RMARemoteHandle,RMATransferId),
+        cciRMARemoteHandle :: MVar (Maybe (CCI.RMARemoteHandle,RMATransferId)),
         cciOutstandingChunks :: Int,
         cciRMAComplete :: MVar CCI.Status
      }
@@ -152,7 +152,7 @@ data ControlMessage =
           ControlMessageCloseConnection -- ^ Request that the given connection terminate (and notify CH)
         | ControlMessageInitConnection Reliability EndPointAddress -- ^ Finish initializaion of the connection (and notify CH)
         | ControlMessageInitRMA {rmaSize :: Int, rmaId :: RMATransferId, rmaEndpointAddress :: String}
-        | ControlMessageAckInitRMA {rmaAckOrginatingId :: RMATransferId, rmaAckRemoteId :: RMATransferId, rmaAckRemoteHandle :: ByteString}
+        | ControlMessageAckInitRMA {rmaAckOrginatingId :: RMATransferId, rmaAckRemote :: Maybe (RMATransferId, ByteString)}
         | ControlMessageFinalizeRMA {rmaOk :: Bool, rmaRemoteFinalizingId :: RMATransferId}
           deriving (Typeable)
 
@@ -172,7 +172,7 @@ instance Binary ControlMessage where
   put ControlMessageCloseConnection = putWord8 0
   put (ControlMessageInitConnection r ep) = putWord8 1 >> put r >> put ep
   put (ControlMessageInitRMA rs rid repa) = putWord8 2 >> put rs >> put rid >> put repa
-  put (ControlMessageAckInitRMA roid rrid bs) = putWord8 3 >> put roid >> put rrid >> put bs
+  put (ControlMessageAckInitRMA roid rr) = putWord8 3 >> put roid >> put rr
   put (ControlMessageFinalizeRMA rok rfin) = putWord8 4 >> put rok >> put rfin
   get = do hdr <- getWord8
            case hdr of
@@ -185,9 +185,8 @@ instance Binary ControlMessage where
                      repa <- get
                      return $ ControlMessageInitRMA rs rid repa
              3 -> do roid <- get
-                     rrid <- get
-                     bs <- get
-                     return $ ControlMessageAckInitRMA roid rrid bs
+                     rr <- get
+                     return $ ControlMessageAckInitRMA roid rr
              4 -> do rok <- get
                      rfin <- get
                      return $ ControlMessageFinalizeRMA rok rfin
@@ -388,37 +387,40 @@ endpointLoop transport endpoint =
                                                 putEvent endpoint (ConnectionClosed connid)
                                                 return $ Just epls {eplsConnectionsByConnection = Map.delete conn connectionsByConnection}
                                           ControlMessageInitRMA {rmaSize=rmasize, 
-                                                                 rmaId=orginatingId} -> -- TODO error handling, if allocaiton fails sends a NACK
-                                             do (newpool, buffer) <- Pool.getBuffer pool (Left rmasize)
-                                                let notify = ControlMessageAckInitRMA
-                                                           {rmaAckOrginatingId=orginatingId,
-                                                            rmaAckRemoteId = nextTransferId, 
-                                                            rmaAckRemoteHandle = CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer)}
-                                                sendControlMessageInside transport endpoint conn notify
-                                                return $ Just epls {eplsNextTransferId = nextTransferId+1,
+                                                                 rmaId=orginatingId} -> -- TODO error handling, if allocaiton fails sends a NACK!!!
+                                             do mres <- Pool.newBuffer pool (Left rmasize) 
+                                                case mres of
+                                                  Just (newpool, buffer) ->
+                                                    let notify = ControlMessageAckInitRMA
+                                                               {rmaAckOrginatingId=orginatingId,
+                                                                rmaAckRemote = Just (nextTransferId, 
+                                                                           CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer))}
+                                                     in do sendControlMessageInside transport endpoint conn notify
+                                                           return $ Just epls {eplsNextTransferId = nextTransferId+1,
                                                                     eplsTransfers = Map.insert nextTransferId buffer transfers,
                                                                     eplsPool = newpool}
+                                                  Nothing -> 
+                                                       do sendControlMessageInside transport endpoint conn ControlMessageAckInitRMA
+                                                               {rmaAckOrginatingId=orginatingId,
+                                                                rmaAckRemote = Nothing}
+                                                          return$ Just epls
                                           ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
-                                                            rmaAckRemoteId = remoteId, 
-                                                            rmaAckRemoteHandle = bs} -> -- TODO error handling
+                                                            rmaAckRemote = Nothing} ->
+                                             putRMARemoteHandle endpoint originatingId Nothing >> return (Just epls)
+                                          ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
+                                                            rmaAckRemote = Just (remoteId, bs)} ->
                                              let Just remoteHandle = CCI.createRMARemoteHandle bs
-                                              in withMVar (cciEndpointState endpoint) $ \st ->
-                                                   case st of
-                                                      CCIEndpointValid {cciRMAState = rmastate} ->
-                                                         case Map.lookup originatingId rmastate of
-                                                           Nothing -> dbg "Bogus originating id"
-                                                           Just myrma -> putMVar (cciRMARemoteHandle myrma)
-                                                                 (remoteHandle, remoteId)
-                                                      _ -> dbg "Unexpected endpoint state"
-                                                  >> (return $ Just epls)
+                                              in putRMARemoteHandle endpoint originatingId (Just (remoteHandle, remoteId)) >>
+                                                    return (Just epls)
+
                                           ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid} ->
                                              case Map.lookup remoteid transfers of
                                                Nothing -> dbg "Bogus transfer id" >> return (Just epls)
                                                Just buffer -> 
                                                    do when ok $ 
-                                                         do buffermsg <- Pool.getByteString buffer
+                                                         do buffermsg <- Pool.getBufferByteString buffer
                                                             putEvent endpoint (Received connid [buffermsg])
-                                                      newpool <- Pool.releaseBuffer pool buffer
+                                                      newpool <- Pool.freeBuffer pool buffer
                                                       return $ Just epls {eplsTransfers = Map.delete remoteid transfers,
                                                                       eplsPool = newpool}
                                   _ -> dbg "Unknown message type" >> (return $ Just epls)
@@ -481,6 +483,14 @@ endpointLoop transport endpoint =
                                putMVar (cciEndpointFinalized endpoint) ()
                  Just newstate -> loop newstate
   in loop newEpls 
+        where putRMARemoteHandle endpoint originatingId val =
+                 withMVar (cciEndpointState endpoint) $ \st ->
+                   case st of
+                      CCIEndpointValid {cciRMAState = rmastate} ->
+                         case Map.lookup originatingId rmastate of
+                           Nothing -> dbg "Bogus originating id"
+                           Just myrma -> putMVar (cciRMARemoteHandle myrma) val
+                      _ -> dbg "Unexpected endpoint state"
         
 -- | Notify CH that something happened. Usually, a connection was opened or closed or a message was received.
 putEvent :: CCIEndpoint -> Event -> IO ()
@@ -661,7 +671,10 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                 initMsg = ControlMessageInitRMA {rmaSize = msgLength, rmaId = rmatid, rmaEndpointAddress = cciUri endpoint}
              in timeoutMaybe maybeTimeout err $
                                 do sendInitMsg
-                                   takeMVar (cciRMARemoteHandle rmastate)
+                                   res <- takeMVar (cciRMARemoteHandle rmastate)
+                                   case res of
+                                      Just n -> return n
+                                      Nothing -> throwIO $ TransportError SendFailed "Couldn't allocate remote buffer"
          doRMA = bracketOnError 
                     getRemoteHandle
                     (\(_, remoteid) -> freeRemoteBuffer remoteid False)

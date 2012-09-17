@@ -10,12 +10,15 @@ module Network.Transport.CCI.Pool
     Buffer,
     newPool,
     freePool,
-    getBuffer,
-    releaseBuffer,
+    newBuffer,
+    freeBuffer,
     getBufferHandle,
-    getByteString
+    getBufferByteString
   ) where
 
+import Prelude hiding (catch)
+import Control.Exception (catch, IOException)
+import Control.Applicative ((<$>))
 import Data.Map (Map)
 import qualified Data.Map as Map
 import Network.CCI (RMALocalHandle, RMA_MODE, rmaRegister, rmaDeregister, Endpoint)
@@ -44,7 +47,7 @@ data Buffer = Buffer
 
 data Pool = Pool
      {
-        pNextId :: BufferId,
+        pNextId :: !BufferId,
         pMaxBufferCount :: Int,
         pAlign :: Int,
         pMode :: RMA_MODE,
@@ -78,8 +81,8 @@ newPool endpoint alignment maxbuffercount mode =
         pAvailableBySize=[],
         pAvailableLru=[]}
 
-releaseBuffer :: Pool -> Buffer -> IO Pool
-releaseBuffer pool buffer = 
+freeBuffer :: Pool -> Buffer -> IO Pool
+freeBuffer pool buffer = 
   case Map.lookup (bId buffer) (pInUse pool) of
     Just buf | bSize buf == bSize buffer -> 
        let newpool = pool {
@@ -87,7 +90,7 @@ releaseBuffer pool buffer =
                        pAvailableBySize = List.insertBy (comparing bSize) buffer (pAvailableBySize pool),
                        pAvailableLru = bId buf : pAvailableLru pool
                       }
-        in cleanup newpool
+        in return newpool
     _ -> dbg "Trying to free buffer that I don't know about" >> return pool
 
 cleanup :: Pool -> IO Pool
@@ -99,7 +102,7 @@ cleanup pool =
             newpool = pool { pAvailableLru = init $ pAvailableLru pool,
                              pAvailableBySize = List.deleteBy byId killme (pAvailableBySize pool)}
          in do destroyBuffer pool killme
-               cleanup newpool
+               return newpool
      else return pool 
     where byId a b = bId a == bId b
 
@@ -109,30 +112,34 @@ destroyBuffer pool buffer =
     freeAligned ((bStart buffer,bSize buffer),bAllocStart buffer)
 
 
-getBuffer :: Pool -> Either Int ByteString -> IO (Pool, Buffer)
-getBuffer pool content =
+newBuffer :: Pool -> Either Int ByteString -> IO (Maybe (Pool, Buffer))
+newBuffer pool content = 
    case findAndRemove goodSize (pAvailableBySize pool) of
       (_newavailable,Nothing) ->
-         do (cstr@(start,_),allocstart) <- allocAligned (pAlign pool) (neededSize content)
-            case content of
-              Right bs ->
-                copyTo bs start
-              Left _ -> return ()
-            handle <- rmaRegister (pEndpoint pool) cstr (pMode pool)
-            let newbuf = 
-                   Buffer {
-                     bId = pNextId pool,
-                     bAllocStart = allocstart,
-                     bStart = start,	
-                     bSize = neededSize content,
-                     bHandle = handle
-                  }
-                newpool = pool {
-                     pNextId = (pNextId pool)+1,
-                     pInUse = Map.insert (bId newbuf) newbuf (pInUse pool)
-                  }
-            return (newpool, newbuf)
-      (newavailable,Just buf) ->
+         do mres <- allocAligned' (pAlign pool) (neededSize content)
+            case mres of
+              Nothing -> return Nothing
+              Just (cstr@(start,_),allocstart) -> do
+                case content of
+                  Right bs ->
+                    copyTo bs start
+                  Left _ -> return ()
+                handle <- rmaRegister (pEndpoint pool) cstr (pMode pool)
+                let newbuf = 
+                       Buffer {
+                         bId = pNextId pool,
+                         bAllocStart = allocstart,
+                         bStart = start,	
+                         bSize = neededSize content,
+                         bHandle = handle
+                      }
+                    newpool = pool {
+                         pNextId = (pNextId pool)+1,
+                         pInUse = Map.insert (bId newbuf) newbuf (pInUse pool)
+                      }
+                cleanpool <- cleanup newpool
+                return $ Just (cleanpool, newbuf)
+      (newavailable,Just buf) -> 
          let newpool = pool {pAvailableBySize = newavailable,
                              pInUse = Map.insert (bId buf) buf (pInUse pool),
                              pAvailableLru = List.delete (bId buf) (pAvailableLru pool)}
@@ -140,13 +147,18 @@ getBuffer pool content =
                   Right bs ->
                     copyTo bs (bStart buf)
                   Left _ -> return ()
-                return (newpool, buf)
+                cleanpool <- cleanup newpool
+                return $ Just (cleanpool, buf)
     where goodSize b = bSize b >= (neededSize content)
           neededSize (Left n) = n
           neededSize (Right str) = BSC.length str
 
 freeAligned :: (CStringLen, Ptr CChar) -> IO ()
 freeAligned (_,actual) = free actual
+
+allocAligned' :: Int -> Int -> IO (Maybe (CStringLen, Ptr CChar))
+allocAligned' a s =
+   catch (Just <$> allocAligned a s) (\x -> const (return Nothing) (x::IOException))
 
 allocAligned :: Int -> Int -> IO (CStringLen, Ptr CChar)
 allocAligned 0 size = mallocBytes size >>= \p -> return ((p,size),p)
@@ -169,8 +181,8 @@ moveToFront x xs = go [] xs
 
 -}
 
-getByteString :: Buffer -> IO ByteString
-getByteString buffer =
+getBufferByteString :: Buffer -> IO ByteString
+getBufferByteString buffer =
    BSC.packCStringLen (bStart buffer, bSize buffer)
 
 findAndRemove :: (a -> Bool) -> [a] -> ([a], Maybe a)
