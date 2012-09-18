@@ -29,11 +29,10 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
 
        go = do 
           initCCI
-          --[ clientDone , serverDone ] <- replicateM 2 newEmptyMVar 
           serverAddress <- newEmptyMVar 
 
           --start server
-          forkIO $  do 
+          forkIO ( (  do 
              endpoint  <- createPollingEndpoint Nothing 
              getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr 
 
@@ -54,6 +53,7 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
              pollWithEventData endpoint $ \ev ->
                    case ev of 
                         EvRecv eventbytes  connection  -> do 
+                          forkIO $ do
                            msg <- packEventBytes eventbytes
                            BS.putStrLn msg
                            send connection ( BS.pack "Hi Client. I am not able to send you reply :(" ) ( 0 :: WordPtr )  
@@ -72,11 +72,11 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
                            disconnect connection
                         _ -> fail "Something wrong with this connection"
              --} 
-             --threadDelay 10000000
-             putMVar serverDone ()         
+             --threadDelay 100000000
+             ) `finally` putMVar serverDone ()  )       
 
           --start client
-          forkIO $  do 
+          forkIO ( (  do 
              endpoint  <- createPollingEndpoint Nothing
              --connect  to server
              addr <- readMVar serverAddress 
@@ -95,9 +95,7 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
              disconnect conn
              --destroy endpoint
              destroyEndpoint endpoint 
-             --threadDelay 10000000
-             putMVar clientDone ()
+             --threadDelay 100000000
+             ) `finally`  putMVar clientDone () )
 
           return ()
-          --readMVar serverDone 
-          --readMVar clientDone 
