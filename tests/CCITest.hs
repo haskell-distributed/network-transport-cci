@@ -10,73 +10,94 @@ import System.Environment
 
 
 
-main = do 
-     testEarlyDisconnect 
+main = do
+     firstTestCase <- do 
+        putStrLn "First Test case" 
+        [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
+        testEarlyDisconnect clientDone serverDone
+        readMVar clientDone
+        readMVar serverDone
      return ()
 
 
 
 --This test is bound to fail because of lack of implementaion of KeepAliveTimeOut in CCI. The server closes the connection after client disconnects.
-testEarlyDisconnect :: IO ()
-testEarlyDisconnect = do 
+testEarlyDisconnect :: MVar () -> MVar () -> IO ()
+testEarlyDisconnect clientDone serverDone  = catch go handler where 
+       handler :: SomeException -> IO ()
+       handler e = putStrLn ( show e ) >> putMVar clientDone () >> putMVar serverDone () >> throw e  
+
+       go = do 
           initCCI
-          [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar 
+          --[ clientDone , serverDone ] <- replicateM 2 newEmptyMVar 
           serverAddress <- newEmptyMVar 
+
           --start server
           forkIO $  do 
-               
-             ( endpoint , _ ) <- createBlockingEndpoint Nothing 
+             endpoint  <- createPollingEndpoint Nothing 
              getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr 
-             ev_1  <-  getEvent endpoint >>= \( Just s ) -> getEventData s 
-             case ev_1  of 
+
+             --Connection request from Client. Accept this connection.
+             pollWithEventData endpoint $ \ev -> 
+               case ev  of 
                   EvConnectRequest sev eb attr  -> accept sev ( 0 :: WordPtr ) 
                   _ -> fail "Some thing wrong with connection"
 
-             EvAccept _ _  <- getEvent endpoint >>= \( Just s ) -> getEventData s 
+             pollWithEventData endpoint $ \ev ->
+                   case ev of 
+                        EvAccept _ _ -> return ()
+                        _ -> fail "Error in connection acception sequence"
 
              -- client send message. receive it and send it but client has closed its connection so sever will not be able to send the reply. It will show 
              -- Timeout in EvSend status. Currently keepalivetimeout is not implement otherwise application has to take care of connection either reconnect or close 
              -- connection.             
-             ev_2 <- getEvent endpoint >>= \( Just s ) -> getEventData s 
-             case ev_2 of 
-                EvRecv eventbytes  connection  -> do 
-                       msg <- packEventBytes eventbytes
-                       BS.putStrLn msg
-                       send connection ( BS.pack "Hi Client. I am not able to send you reply :(" ) ( 0 :: WordPtr )  
-                _ -> fail "Something wrong with this connection"
+             pollWithEventData endpoint $ \ev ->
+                   case ev of 
+                        EvRecv eventbytes  connection  -> do 
+                           msg <- packEventBytes eventbytes
+                           BS.putStrLn msg
+                           send connection ( BS.pack "Hi Client. I am not able to send you reply :(" ) ( 0 :: WordPtr )  
+                        _ -> fail "Something wrong with this connection"
 
              -- send will fail to deliver the message 
-             EvSend _ _ _ <- getEvent endpoint >>= \( Just s ) -> getEventData s
+             pollWithEventData endpoint $ \ev ->
+                   case ev of 
+                        EvSend _ st  _ -> putStrLn . show $ st
+                        _ -> fail "Something wrong with this connection"
 
              --after fair amount of time KeepAliveTimeOut will occur. Currently not implemented in CCI.
-             {--ev_3 <- getEvent endpoint >>= \( Just s ) -> getEventData s
-             case ev_3 of 
-                    EvKeepAliveTimedOut connection -> do 
+             {--pollWithEventData endpoint $ \ev ->
+                   case ev of 
+                        EvKeepAliveTimedOut connection -> do 
                            disconnect connection
-                    _ -> fail "Something wrong with this connection"
+                        _ -> fail "Something wrong with this connection"
              --} 
+             --threadDelay 10000000
              putMVar serverDone ()         
 
           --start client
           forkIO $  do 
-             ( endpoint , _ ) <- createBlockingEndpoint Nothing
+             endpoint  <- createPollingEndpoint Nothing
              --connect  to server
              addr <- readMVar serverAddress 
              connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing 
              --server accepted the connection
              newconnMVar  <- newEmptyMVar 
-             ev_1  <-  getEvent endpoint >>= \( Just s ) -> getEventData s
-             case ev_1 of 
-                     EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn 
-                     _ -> fail "Something wrong with client"
+             pollWithEventData endpoint $ \ev ->
+                   case ev of 
+                        EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn 
+                        _ -> fail "Something wrong with client"
+
              -- send something over this connection 
              conn <- readMVar newconnMVar  
-             send conn ( BS.pack "Hi Server. Yo won't be able to send me reply :)" ) ( 0 :: WordPtr ) 
+             send conn ( BS.pack "Hi Server. You won't be able to send me reply :)" ) ( 0 :: WordPtr ) 
              -- close this connection
              disconnect conn
              --destroy endpoint
              destroyEndpoint endpoint 
+             --threadDelay 10000000
              putMVar clientDone ()
 
-          readMVar serverDone 
-          readMVar clientDone 
+          return ()
+          --readMVar serverDone 
+          --readMVar clientDone 
