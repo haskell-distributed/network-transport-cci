@@ -8,6 +8,7 @@ import Data.Binary (Binary(..))
 import Data.Typeable (Typeable)
 import Data.Foldable (forM_)
 import Control.Concurrent (threadDelay,ThreadId,myThreadId)
+import Data.Time
 import Control.Concurrent.MVar 
   ( MVar
   , newMVar
@@ -18,7 +19,7 @@ import Control.Concurrent.MVar
   , readMVar
   )
 import Control.Monad (replicateM_, replicateM, mapM, mapM_)
-import Control.Exception (throwIO,SomeException, throwTo)
+import Control.Exception (throwIO,SomeException, throwTo, finally)
 import Control.Applicative ((<$>), (<*>))
 import qualified Network.Transport as NT (Transport, closeEndPoint)
 import Network.Transport.CCI (createTransport, defaultCCIParameters)
@@ -27,6 +28,14 @@ import Control.Distributed.Process.Internal.Types (LocalNode(localEndPoint))
 import Control.Distributed.Process.Node
 import Control.Distributed.Process.Serializable (Serializable)
 import TestAuxiliary
+
+timeIt :: IO a -> IO a
+timeIt fun =
+  do a <- getCurrentTime
+     fun `Control.Exception.finally` do
+        b <- getCurrentTime
+        let diff = diffUTCTime b a
+        print $ "Ran in "++show diff
 
 newtype Ping = Ping ProcessId
   deriving (Typeable, Binary, Show)

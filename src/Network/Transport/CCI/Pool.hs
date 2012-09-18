@@ -13,7 +13,8 @@ module Network.Transport.CCI.Pool
     newBuffer,
     freeBuffer,
     getBufferHandle,
-    getBufferByteString
+    getBufferByteString,
+    convertBufferToByteString
   ) where
 
 import Prelude hiding (catch)
@@ -32,8 +33,11 @@ import qualified Data.ByteString.Char8 as BSC
 import Data.ByteString.Char8 (ByteString)
 import Data.Ord (comparing)
 import Data.Maybe (fromJust)
+import Network.Transport.CCI.ByteString (unsafePackMallocCStringLen)
 
 type BufferId = Int
+
+-- TODO call spares (somewhwhere??) to allocate buffers in advance of their need
 
 -- | A buffer, identified by a handle. With this handle,
 -- we can deallocate with 'freeBuffer', we can get its
@@ -110,6 +114,18 @@ freeBuffer pool buffer =
         in return newpool
     _ -> dbg "Trying to free buffer that I don't know about" >> return pool
 
+-- | Allocate excess buffers up to our limit
+spares :: Pool handle -> Int -> IO (Pool handle)
+spares pool defaultsize =
+  if (pMaxBufferCount pool > length (pAvailableLru pool)) 
+     then do res <- newBuffer pool (Left defaultsize)
+             case res of
+                Just (newpool, newbuf) ->
+                    freeBuffer newpool newbuf   
+                Nothing -> return pool
+     else return pool
+
+-- | Remove and destroy excess buffers beyond our limit
 cleanup :: Pool handle -> IO (Pool handle)
 cleanup pool =
   if (pMaxBufferCount pool < length (pAvailableLru pool)) 
@@ -215,3 +231,13 @@ findAndRemove f xs = go [] xs
          go before (x:after) | f x = ((reverse before)++after,Just x)
          go before (x:after) = go (x:before) after
 
+-- | A zero-copy alternative to getBufferByteString. The buffer is removed from
+-- the pool; after this call, the Buffer object is invalid. The resulting ByteString
+-- occupies the same space and will be handled normally by the gc.
+convertBufferToByteString :: Pool handle -> Buffer handle -> IO (Pool handle, ByteString)
+convertBufferToByteString pool buffer = 
+   let newpool = pool {pInUse = Map.delete (bId buffer) (pInUse pool)}
+    in do (pUnregister pool) (bHandle buffer)
+          bs <- unsafePackMallocCStringLen (bStart buffer, bSize buffer)
+          -- TODO we should reinsert available buffer into the pool, so we're ready for the next msg
+          return (newpool, bs)

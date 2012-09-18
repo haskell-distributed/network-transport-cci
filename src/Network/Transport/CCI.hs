@@ -12,7 +12,7 @@ module Network.Transport.CCI
      ReceiveStrategy(..)
   ) where
 
-import Control.Applicative ((<*>),pure)
+import Control.Applicative ((<*>),(<$>),pure)
 import Control.Monad (liftM, forM_, when)
 import Control.Concurrent.Chan
 import Data.Maybe (catMaybes)
@@ -23,15 +23,13 @@ import Control.Exception (catch, bracketOnError, try, SomeException, throw, thro
 import Data.Binary (Binary,put,get,getWord8, putWord8, encode,decode)
 import Data.ByteString (ByteString)
 import Data.Char (chr,ord)
-import qualified Foreign.Marshal.Alloc as Alloc
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
 import Network.CCI (WordPtr)
-import Foreign.C.String (CStringLen)
 import Network.Transport.Internal (timeoutMaybe)
-import Network.Transport (EventErrorCode(..), Transport(..), TransportError(..), NewEndPointErrorCode(..), EndPointAddress(..), Event(..), TransportError, ConnectErrorCode(..), EndPoint(..), SendErrorCode(..), NewMulticastGroupErrorCode(..), ResolveMulticastGroupErrorCode(..), Reliability(..), ConnectHints(..), Connection(..), ConnectionId)
+import Network.Transport (Transport(..), TransportError(..), NewEndPointErrorCode(..), EndPointAddress(..), Event(..), TransportError, ConnectErrorCode(..), EndPoint(..), SendErrorCode(..), NewMulticastGroupErrorCode(..), ResolveMulticastGroupErrorCode(..), Reliability(..), ConnectHints(..), Connection(..), ConnectionId)
 import Prelude hiding (catch)
-import qualified Data.ByteString.Char8 as BSC (packCStringLen, concat, useAsCStringLen, head, tail, singleton,pack, unpack, empty, length)
+import qualified Data.ByteString.Char8 as BSC (concat, head, tail, singleton,pack, unpack, empty, length)
 import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
 import qualified Data.Map as Map
 import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendvSilent, disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
@@ -297,14 +295,6 @@ endpointHandler mv =
         exceptionHandler e = dbg $ "Exception in endpointHandler: "++show e -- TODO shutdown endpoint here
         go transport endpoint = endpointLoop transport endpoint
 
-allocCStringLen :: Int -> IO CStringLen
-allocCStringLen size = 
-   do buf <- Alloc.mallocBytes size -- TODO this should be aligned (to something)
-      return (buf, size)
-
-freeCStringLen :: CStringLen -> IO ()
-freeCStringLen (buf,_) = Alloc.free buf
-
 data EndpointLoopState = EndpointLoopState
     {
        eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId,
@@ -408,23 +398,40 @@ endpointLoop transport endpoint =
                                                           return$ Just epls
                                           ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
                                                             rmaAckRemote = Nothing} ->
-                                             putRMARemoteHandle endpoint originatingId Nothing >> return (Just epls)
+                                             putRMARemoteHandle originatingId Nothing >> return (Just epls)
                                           ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
                                                             rmaAckRemote = Just (remoteId, bs)} ->
                                              let Just remoteHandle = CCI.createRMARemoteHandle bs
-                                              in putRMARemoteHandle endpoint originatingId (Just (remoteHandle, remoteId)) >>
+                                              in putRMARemoteHandle originatingId (Just (remoteHandle, remoteId)) >>
                                                     return (Just epls)
 
                                           ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid} ->
                                              case Map.lookup remoteid transfers of
                                                Nothing -> dbg "Bogus transfer id" >> return (Just epls)
                                                Just buffer -> 
-                                                   do when ok $ 
-                                                         do buffermsg <- Pool.getBufferByteString buffer
-                                                            putEvent endpoint (Received connid [buffermsg])
-                                                      newpool <- Pool.freeBuffer pool buffer
-                                                      return $ Just epls {eplsTransfers = Map.delete remoteid transfers,
+                                                 let pushEvent buffermsg = putEvent endpoint (Received connid [buffermsg])
+                                                     closeBufferNoCopy :: IO EndpointLoopState
+                                                     closeBufferNoCopy =
+                                                       (if ok
+                                                          then do (newpool, buffermsg) <- Pool.convertBufferToByteString pool buffer
+                                                                  pushEvent buffermsg
+                                                                  return newpool
+                                                          else Pool.freeBuffer pool buffer)
+                                                        >>= \newpool -> return $ epls {eplsTransfers = Map.delete remoteid transfers,
                                                                       eplsPool = newpool}
+                                                     closeBufferReUse :: IO EndpointLoopState
+                                                     closeBufferReUse =
+                                                       do when ok $ 
+                                                            do buffermsg <- Pool.getBufferByteString buffer
+                                                               pushEvent buffermsg
+                                                          newpool <- Pool.freeBuffer pool buffer
+                                                          return $ epls {eplsTransfers = Map.delete remoteid transfers,
+                                                                      eplsPool = newpool}
+                                                  in Just <$> closeBufferNoCopy
+                                                     -- TODO there is some ideal tradeoff in message size; smaller messages
+                                                     -- should be have their buffers reuused, larger buffers should be handed
+                                                     -- off to CH without copying. (a) At what point do we make this change?
+                                                     -- (b) When do we call Pool.spares to allocate excess buffer capacity in advance?
                                   _ -> dbg "Unknown message type" >> (return $ Just epls)
                   CCI.EvConnect connectionId (Left status) ->
 -- TODO: change connection state to error/invalid/closed
@@ -485,7 +492,7 @@ endpointLoop transport endpoint =
                                putMVar (cciEndpointFinalized endpoint) ()
                  Just newstate -> loop newstate
   in loop newEpls 
-        where putRMARemoteHandle endpoint originatingId val =
+        where putRMARemoteHandle originatingId val =
                  withMVar (cciEndpointState endpoint) $ \st ->
                    case st of
                       CCIEndpointValid {cciRMAState = rmastate} ->
@@ -498,10 +505,14 @@ endpointLoop transport endpoint =
 putEvent :: CCIEndpoint -> Event -> IO ()
 putEvent endp ev = writeChan (cciChannel endp) ev
 
+{-
+-- TODO use this to indicate KeepaliveTimeout errors, exceptions thrown from message handling thread,
+-- and probably also certain errors (e.g. ETIMEOUT) from send and friends
 putErrorEvent :: CCIEndpoint -> Maybe EndPointAddress -> [ConnectionId] -> String -> IO ()
 putErrorEvent endpoint mepa lcid why =
    let err = EventConnectionLost mepa lcid
     in putEvent endpoint (ErrorEvent (TransportError err why))
+-}
 
 magicEndpointShutdown :: String
 magicEndpointShutdown = "shutdown"
@@ -643,7 +654,7 @@ sendCore transport endpoint conn context isCtrlMsg bs =
 -- 7. The other side copies its buffers to a message, sends it to CH, and frees its buffers
 sendRMA :: CCITransport -> CCIEndpoint -> CCIConnection -> CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendRMA transport endpoint _conn realconn bs _ctx = 
-  do (rmatid,rmastate) <- newRMA endpoint
+  do (rmatid,rmastate) <- newRMA 
      let -- Tell the remote side, if we can, to free the buffer corresponding to the given ID.
          -- If ok, then the buffer should be complete, create a message from it. Otherwise,
          -- throw it away.
@@ -703,7 +714,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                  -- the buffer. If we get an error from sending, throw.
                                  takeMVar (cciRMAComplete rmastate) >>= throwStatus)
      doRMA `finally` eraseRmaState -- probably shold mask exceptions here
-        where  newRMA endpoint = 
+        where  newRMA = 
                  modifyMVar (cciEndpointState endpoint) $ \st ->
                    case st of
                      CCIEndpointValid 
