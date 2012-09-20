@@ -20,24 +20,24 @@ main = do
         [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
         testEarlyDisconnect clientDone serverDone
         mapM_ readMVar [ clientDone , serverDone ]
-     {--
+    
      testCase_2 <- do 
         putStrLn "\n2-->\nThe behaviour of a premature CloseSocket request.This test case is specific to TCP"
         putStr "Connection can not be established until the server grants the permission. When server accepts the connection and after that  client "
         putStr " has closed the connection then server send status will be ETIMEDOUT if server wants to communicate with client. Based on keep alive timeout application will have "
         putStrLn " to take care of disconnection. Almost similart to 1"
         --testEarlyCloseSocket
-
+     {--
      testCase_3 <- do 
         putStrLn "\n3-->\nTest the creation of a transport with an invalid address."
         --ToDo
         --testInvalidAddress
-     
+     --}
      testCase_4 <- do 
         putStrLn "\n4-->\nTest connecting to invalid or non-existing endpoints. This can be done by passing invalid address of  server to client trying to connect to server."
         putStrLn "See the CCIServer.hs file.Run the server and pass the its wrong address ( wrong IP + correct port ) or ( correct IP + wrong port )"
         --testInvalidConnect
-
+     {--
      testCase_5 <- do 
         putStrLn "\n5-->\nTest that an endpoint can ignore CloseSocket requests (in reality this would happen when the endpoint sends a new connection request before receiving an (already underway) CloseSocket request)."
         putStr "We don't have any such request in CCI ( CloseSocket ). When client will close the connection , server will not aware until keep alive timeout event occur."
@@ -67,15 +67,17 @@ main = do
       putStrLn "\n9-->\nTest what happens when the transport breaks completely."
       --ToDO
       --testBreakTransport
-     
+     --}  
      testCase_10 <- do 
        putStr "\n10-->\nTest that a second call to 'connect' might succeed even if the first failed. This is a TCP specific test rather than an endpoint specific test"
        putStr " because we must manually create the endpoint address to match an endpoint we have yet to set up.  Then test that we get a connection lost message after the remote "
        putStrLn " endpoint suddenly closes the socket, and that a subsequent 'connect' allows us to re-establish a connection to the same endpoint."
        putStrLn "Again TCP specific. Call the connect function twice. Reject first request and accept second."
-       --ToDo 
-       --testReconnect
-     --} 
+       [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
+       testReconnect clientDone serverDone
+       mapM_ readMVar [ clientDone , serverDone ] 
+       
+      
      testCase_11 <- do 
        putStrLn "\n11-->\nTest what happens if we close the socket one way only. This means that the 'recv' in 'handleIncomingMessages' will not fail, but a 'send' or 'connect' *will* fail. We are testing that error handling everywhere does the right  thing."
        putStrLn "Actually, CCI connections are bi-directional, but the Transport layer uses (mostly) only one direction. It would be interesting to see what happens if one side of the connection closes but the other keeps it open."
@@ -275,6 +277,73 @@ testMany  = catch go handler  where
                             return ()
                    putMVar done () 
                  readMVar done
+
+
+--This test case is specific to TCP.Send 
+testReconnect :: MVar () -> MVar () -> IO ()  
+testReconnect clientDone serverDone = catch go handler where 
+   
+       handler :: SomeException -> IO ()
+       handler e = putStrLn ( show e ) >> throw e
+
+       go = do 
+             initCCI
+             serverAddress <- newEmptyMVar 
+             ---start server 
+             forkIO $ ( ( do 
+                endpoint <- createPollingEndpoint Nothing 
+                getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
+ 
+                --connection request from client. reject this. 
+                pollWithEventData endpoint $ \ev ->
+                             case ev  of
+                                 EvConnectRequest sev eb attr  ->   reject  sev
+                                 _ -> fail "Some thing wrong with connection"
+ 
+                --client send again the request. Accept this time
+                pollWithEventData endpoint $ \ev ->
+                             case ev  of
+                                 EvConnectRequest sev eb attr  ->   accept sev ( 0 :: WordPtr )
+                                 _ -> fail "Some thing wrong with connection"
+
+                pollWithEventData endpoint $ \ev ->
+                             case ev of
+                                 EvAccept cid  _ -> return ()
+                                 _ -> fail "Error in connection acception sequence"
+
+                pollWithEventData endpoint $ \ev ->
+                             case ev of
+                                 EvRecv eventbytes  connection  -> do
+                                        msg <- packEventBytes eventbytes
+                                        BS.putStrLn msg
+                                 _ -> fail "Something wrong with this connection"
+
+                          ) `finally` putMVar serverDone () ) 
+
+             --start client 
+             forkIO $ ( ( do 
+                  
+                addr <- readMVar serverAddress
+                endpoint <- createPollingEndpoint Nothing
+                --server rejected this connection 
+                connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing                  
+                pollWithEventData endpoint $ \ev -> putStrLn .  show $ ev
+                --send again and this time it accepts again
+                connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing
+                newconnMVar  <- newEmptyMVar
+                pollWithEventData endpoint $ \ev ->
+                       case ev of
+                          EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn
+                          _ -> fail "Something wrong with client"
+
+                id <- myThreadId
+                conn <- readMVar newconnMVar
+                send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )
+                disconnect conn
+                destroyEndpoint endpoint
+
+                        ) `finally` putMVar clientDone () )
+             return () 
 
 
 --Closing the network layer in both client and server thread and they are still able to send and receive message. Currently a known bug in a the CCI/CH layer.
