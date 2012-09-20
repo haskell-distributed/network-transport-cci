@@ -9,7 +9,8 @@ import qualified Data.Map as M
 import Control.Concurrent
 import Control.Monad
 import System.Environment
-
+import GHC.IO.Exception (ioe_errno)
+import Foreign.C.Error (Errno(..), eADDRNOTAVAIL)
 
 
 main = do
@@ -21,49 +22,49 @@ main = do
         mapM_ readMVar [ clientDone , serverDone ]
      {--
      testCase_2 <- do 
-        putStrLn "2-->\nThe behaviour of a premature CloseSocket request.This test case is specific to TCP"
+        putStrLn "\n2-->\nThe behaviour of a premature CloseSocket request.This test case is specific to TCP"
         putStr "Connection can not be established until the server grants the permission. When server accepts the connection and after that  client "
         putStr " has closed the connection then server send status will be ETIMEDOUT if server wants to communicate with client. Based on keep alive timeout application will have "
         putStrLn " to take care of disconnection. Almost similart to 1"
         --testEarlyCloseSocket
 
      testCase_3 <- do 
-        putStrLn "3-->\nTest the creation of a transport with an invalid address."
+        putStrLn "\n3-->\nTest the creation of a transport with an invalid address."
         --ToDo
         --testInvalidAddress
      
      testCase_4 <- do 
-        putStrLn "4-->\nTest connecting to invalid or non-existing endpoints. This can be done by passing invalid address of  server to client trying to connect to server."
+        putStrLn "\n4-->\nTest connecting to invalid or non-existing endpoints. This can be done by passing invalid address of  server to client trying to connect to server."
         putStrLn "See the CCIServer.hs file.Run the server and pass the its wrong address ( wrong IP + correct port ) or ( correct IP + wrong port )"
         --testInvalidConnect
 
      testCase_5 <- do 
-        putStrLn "5-->\nTest that an endpoint can ignore CloseSocket requests (in reality this would happen when the endpoint sends a new connection request before receiving an (already underway) CloseSocket request)."
+        putStrLn "\n5-->\nTest that an endpoint can ignore CloseSocket requests (in reality this would happen when the endpoint sends a new connection request before receiving an (already underway) CloseSocket request)."
         putStr "We don't have any such request in CCI ( CloseSocket ). When client will close the connection , server will not aware until keep alive timeout event occur."
         putStrLn "We don't have a close request in CCI, but we do have one at the transport layer. This is implemented as ControlMessageCloseConnection.Thanks Jeff!"
         --ToDo see the Transport layer coder 
         --testIgnoreCloseSocket
 
      testCase_6 <- do 
-       putStrLn "6-->\nLike test case 5 , but now the server requests a connection after the client closed their connection. In the meantime, the server will have sent a CloseSocket request to the client, and must block until the client responds."
+       putStrLn "\n6-->\nLike test case 5 , but now the server requests a connection after the client closed their connection. In the meantime, the server will have sent a CloseSocket request to the client, and must block until the client responds."
        --ToDo 
        --testBlockAfterCloseSocket
      --}  
      testCase_7 <- do 
-       putStrLn "7-->\nTest what happens when a remote endpoint sends a connection request to our transport for an endpoint it already has a connection to."
+       putStrLn "\n7-->\nTest what happens when a remote endpoint sends a connection request to our transport for an endpoint it already has a connection to."
        putStrLn "Client will send 10 simultaneous  request and only one will be accepted."
        [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
        testUnnecessaryConnect clientDone serverDone
        mapM_ readMVar [ clientDone , serverDone ]       
       
-     {--
+    
      testCase_8 <- do 
-       putStrLn "8-->\nTest that we can create \"many\" transport instances."
-       --ToDo
-       --testMany
-
+       putStrLn "\n8-->\nTest that we can create \"many\" transport instances."
+       testMany
+       
+     {--
      testCase_9 <- do 
-      putStrLn "9-->\nTest what happens when the transport breaks completely."
+      putStrLn "\n9-->\nTest what happens when the transport breaks completely."
       --ToDO
       --testBreakTransport
      
@@ -180,39 +181,42 @@ testUnnecessaryConnect clientDone serverDone = catch go handler where
            
            --start server 
            forkIO ( ( do
-               
-              --_ <- replicateM 3 $  do 
-                --done <- newEmptyMVar 
-                --forkIO $ do 
-                  endpoint  <- createPollingEndpoint Nothing
-                  getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
+              {-- 
+              _ <- replicateM 3 $  do 
+                   done <- newEmptyMVar 
+
+                   forkIO $ do --}
+                           endpoint  <- createPollingEndpoint Nothing
+                           getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
           
-                  --Connection request from client. Accept the connection.
-                  pollWithEventData endpoint $ \ev ->
-                     case ev  of
-                       EvConnectRequest sev eb attr  ->   accept sev ( 0 :: WordPtr )
-                       _ -> fail "Some thing wrong with connection"
+                           --Connection request from client. Accept the connection.
+                           pollWithEventData endpoint $ \ev ->
+                             case ev  of
+                                 EvConnectRequest sev eb attr  ->   accept sev ( 0 :: WordPtr )
+                                 _ -> fail "Some thing wrong with connection"
 
-                  pollWithEventData endpoint $ \ev ->
-                     case ev of
-                       EvAccept cid  _ -> return () 
-                       _ -> fail "Error in connection acception sequence"
+                           pollWithEventData endpoint $ \ev ->
+                             case ev of
+                                 EvAccept cid  _ -> return () 
+                                 _ -> fail "Error in connection acception sequence"
              
-                  pollWithEventData endpoint $ \ev ->
-                     case ev of
-                       EvRecv eventbytes  connection  -> do
-                           msg <- packEventBytes eventbytes
-                           BS.putStrLn msg
-                       _ -> fail "Something wrong with this connection"
-
-                  --putMVar done () 
-                 
-                  return () 
+                           pollWithEventData endpoint $ \ev ->
+                             case ev of
+                                 EvRecv eventbytes  connection  -> do
+                                        msg <- packEventBytes eventbytes
+                                        BS.putStrLn msg
+                                 _ -> fail "Something wrong with this connection"
+                          {--
+                           putMVar done () 
+                   readMVar done 
+              return ()--}
+                           
+            
                     ) `finally` putMVar serverDone () )
 
            --start  10 client thread and only one will be accepted.
            forkIO ( ( do
-              _ <- replicateM 10 $ do 
+              _ <- replicateM 10  $ do 
                    done <- newEmptyMVar 
                    forkIO $ do  
                       addr <- readMVar serverAddress               
@@ -232,8 +236,9 @@ testUnnecessaryConnect clientDone serverDone = catch go handler where
                       send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )  
                       disconnect conn 
                       destroyEndpoint endpoint
-                      putMVar done () 
-
+                      putMVar done ()
+                   --uncommenting this readMVar will block of the rest nine threads. They will try to connecet to server with any success. 
+                   --readMVar done  
 
               return ()
 
@@ -241,6 +246,35 @@ testUnnecessaryConnect clientDone serverDone = catch go handler where
 
            return ()
 
+
+--Test that we can create "many" transport instances.  It will throw error if not created.
+testMany :: IO () 
+testMany  = catch go handler  where 
+
+       handler :: SomeException -> IO ()
+       handler e = putStrLn ( show e ) >> throw e
+
+
+       go = do 
+          initCCI
+          Right masterTransport <- createTransport  defaultCCIParameters 
+          Right masterEndPoint <- N.newEndPoint masterTransport 
+
+          replicateM_ 10 $  do
+                 done <- newEmptyMVar 
+                 forkIO $ do 
+                   mTransport <- createTransport defaultCCIParameters
+                   case mTransport of
+                       Left ex -> do
+                            putStrLn $ "Error in transport creation " ++ show ex
+                            putMVar done () 
+                            throw ex
+                       Right transport ->  do 
+                            Right endpoint <- N.newEndPoint transport
+                            Right _        <- N.connect endpoint (N.address masterEndPoint) N.ReliableOrdered N.defaultConnectHints
+                            return ()
+                   putMVar done () 
+                 readMVar done
 
 
 --Closing the network layer in both client and server thread and they are still able to send and receive message. Currently a known bug in a the CCI/CH layer.
