@@ -14,27 +14,27 @@ import System.Environment
 
 main = do
      testCase_1 <- do 
-        putStrLn "1-->" 
+        putStrLn "1-->\nTest that the server gets a ConnectionClosed message when the client closes the socket without sending an explicit control message to the server first."
+        putStrLn "Test case specific to TCP. No ConnectionClosed message in CCI. If client has closed the connection then server will come to know based on keep alive time out." 
         [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
         testEarlyDisconnect clientDone serverDone
-        readMVar clientDone
-        readMVar serverDone
+        mapM_ readMVar [ clientDone , serverDone ]
      {--
      testCase_2 <- do 
         putStrLn "2-->\nThe behaviour of a premature CloseSocket request.This test case is specific to TCP"
         putStr "Connection can not be established until the server grants the permission. When server accepts the connection and after that  client "
         putStr " has closed the connection then server send status will be ETIMEDOUT if server wants to communicate with client. Based on keep alive timeout application will have "
-        putStrLn " to take care of disconnection."
+        putStrLn " to take care of disconnection. Almost similart to 1"
         --testEarlyCloseSocket
 
      testCase_3 <- do 
         putStrLn "3-->\nTest the creation of a transport with an invalid address."
         --ToDo
         --testInvalidAddress
-
+     
      testCase_4 <- do 
         putStrLn "4-->\nTest connecting to invalid or non-existing endpoints. This can be done by passing invalid address of  server to client trying to connect to server."
-        --ToDO copy pase CCIServer code
+        putStrLn "See the CCIServer.hs file.Run the server and pass the its wrong address ( wrong IP + correct port ) or ( correct IP + wrong port )"
         --testInvalidConnect
 
      testCase_5 <- do 
@@ -48,13 +48,15 @@ main = do
        putStrLn "6-->\nLike test case 5 , but now the server requests a connection after the client closed their connection. In the meantime, the server will have sent a CloseSocket request to the client, and must block until the client responds."
        --ToDo 
        --testBlockAfterCloseSocket
-       
+     --}  
      testCase_7 <- do 
        putStrLn "7-->\nTest what happens when a remote endpoint sends a connection request to our transport for an endpoint it already has a connection to."
-       putStrLn "Client will send first request and server will accept that and then again client will send connection request."
-       --Todo 
-       --testUnnecessaryConnect
-
+       putStrLn "Client will send 10 simultaneous  request and only one will be accepted."
+       [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
+       testUnnecessaryConnect clientDone serverDone
+       mapM_ readMVar [ clientDone , serverDone ]       
+      
+     {--
      testCase_8 <- do 
        putStrLn "8-->\nTest that we can create \"many\" transport instances."
        --ToDo
@@ -165,7 +167,83 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
 
           return ()
 
+--In this test case 10 cient send request but only one gets connection.
+testUnnecessaryConnect :: MVar () -> MVar () -> IO () 
+testUnnecessaryConnect clientDone serverDone = catch go handler where 
+  
+       handler :: SomeException -> IO ()
+       handler e = putStrLn ( show e ) >> throw e
+     
+       go = do 
+           initCCI 
+           serverAddress <-  newEmptyMVar 
+           
+           --start server 
+           forkIO ( ( do
+               
+              --_ <- replicateM 3 $  do 
+                --done <- newEmptyMVar 
+                --forkIO $ do 
+                  endpoint  <- createPollingEndpoint Nothing
+                  getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
+          
+                  --Connection request from client. Accept the connection.
+                  pollWithEventData endpoint $ \ev ->
+                     case ev  of
+                       EvConnectRequest sev eb attr  ->   accept sev ( 0 :: WordPtr )
+                       _ -> fail "Some thing wrong with connection"
 
+                  pollWithEventData endpoint $ \ev ->
+                     case ev of
+                       EvAccept cid  _ -> return () 
+                       _ -> fail "Error in connection acception sequence"
+             
+                  pollWithEventData endpoint $ \ev ->
+                     case ev of
+                       EvRecv eventbytes  connection  -> do
+                           msg <- packEventBytes eventbytes
+                           BS.putStrLn msg
+                       _ -> fail "Something wrong with this connection"
+
+                  --putMVar done () 
+                 
+                  return () 
+                    ) `finally` putMVar serverDone () )
+
+           --start  10 client thread and only one will be accepted.
+           forkIO ( ( do
+              _ <- replicateM 10 $ do 
+                   done <- newEmptyMVar 
+                   forkIO $ do  
+                      addr <- readMVar serverAddress               
+                      endpoint <- createPollingEndpoint Nothing
+                      --connect to server
+                      connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing
+
+                      --server accepted the first connection.
+                      newconnMVar  <- newEmptyMVar
+                      pollWithEventData endpoint $ \ev ->
+                       case ev of
+                          EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn
+                          _ -> fail "Something wrong with client"
+
+                      id <- myThreadId 
+                      conn <- readMVar newconnMVar
+                      send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )  
+                      disconnect conn 
+                      destroyEndpoint endpoint
+                      putMVar done () 
+
+
+              return ()
+
+                    ) `finally` putMVar clientDone () )
+
+           return ()
+
+
+
+--Closing the network layer in both client and server thread and they are still able to send and receive message. Currently a known bug in a the CCI/CH layer.
 testUnidirectionalError :: MVar () -> MVar () -> IO () 
 testUnidirectionalError clientDone serverDone = catch go handler where 
 
@@ -176,7 +254,7 @@ testUnidirectionalError clientDone serverDone = catch go handler where
           initCCI
           Right transport <- createTransport defaultCCIParameters
           [ serverAddress , clientAddress ] <- replicateM 2 newEmptyMVar 
-          
+           
           --start server 
           forkIO ( ( do 
                  Right endpoint <- N.newEndPoint transport 
@@ -188,7 +266,7 @@ testUnidirectionalError clientDone serverDone = catch go handler where
                  N.Received cid' msg  <- N.receive endpoint 
                  putStrLn . show $ msg 
                  --close transport and see if client is still able to send the message
-                 N.closeTransport transport 
+                 --N.closeTransport transport 
                  N.Received _ msg' <- N.receive endpoint
                  putStrLn . show $ msg'
                  True <- return $  msg == msg'
@@ -207,10 +285,9 @@ testUnidirectionalError clientDone serverDone = catch go handler where
                  --send message to server 
                  N.send conn [ BS.pack "Hi Server!" ]
                  --close transport and see if client is able to send the message. 
-                 N.closeTransport transport
+                 --N.closeTransport transport
                  N.send conn [ BS.pack "Hi Server!" ]
                  return ()
                    ) `finally` putMVar clientDone () )
-
 
           return ()
