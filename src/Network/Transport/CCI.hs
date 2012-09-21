@@ -219,6 +219,8 @@ createTransport params =
                 closeTransport = apiCloseTransport inter
              }
 
+-- TODO this should shut down all known endpoints
+-- we'll need to keep a list of known endpoints, naturally
 apiCloseTransport :: CCITransport -> IO ()
 apiCloseTransport transport = 
    modifyMVar_ (cciTransportState transport) $ \st ->
@@ -401,10 +403,11 @@ endpointLoop transport endpoint =
                                              putRMARemoteHandle originatingId Nothing >> return (Just epls)
                                           ControlMessageAckInitRMA {rmaAckOrginatingId=originatingId,
                                                             rmaAckRemote = Just (remoteId, bs)} ->
-                                             let Just remoteHandle = CCI.createRMARemoteHandle bs
-                                              in putRMARemoteHandle originatingId (Just (remoteHandle, remoteId)) >>
+                                             case CCI.createRMARemoteHandle bs of
+                                                Just remoteHandle ->
+                                                  putRMARemoteHandle originatingId (Just (remoteHandle, remoteId)) >>
                                                     return (Just epls)
-
+                                                Nothing -> putRMARemoteHandle originatingId Nothing >> return (Just epls)
                                           ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid} ->
                                              case Map.lookup remoteid transfers of
                                                Nothing -> dbg "Bogus transfer id" >> return (Just epls)
