@@ -237,7 +237,7 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
                                  _  -> return () 
                     
 
-              replicateM_ 9000000 loop
+              replicateM_ 3000000 loop
               return () 
 
                       ) `finally` putMVar serverDone () )
@@ -328,7 +328,7 @@ testUnnecessaryConnectSequential  clientDone serverDone = catch go handler where
                                           BS.putStrLn msg
                                  _  -> return ()
 
-                    replicateM_ 9000000 loop
+                    replicateM_ 3000000 loop
                     return ()
         
                         ) `finally` putMVar serverDone () )
