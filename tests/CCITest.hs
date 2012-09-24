@@ -9,9 +9,7 @@ import qualified Data.Map as M
 import Control.Concurrent
 import Control.Monad
 import System.Environment
-import GHC.IO.Exception (ioe_errno)
-import Foreign.C.Error (Errno(..), eADDRNOTAVAIL)
-
+import Debug.Trace
 
 main = do
      testCase_1 <- do 
@@ -52,12 +50,15 @@ main = do
      --}  
      testCase_7 <- do 
        putStrLn "\n7-->\nTest what happens when a remote endpoint sends a connection request to our transport for an endpoint it already has a connection to."
-       putStrLn "Client will send 10 simultaneous  request and only one will be accepted."
+       putStrLn "Client will send 10 concurrent request and only one will be accepted."
        [ clientDone , serverDone ] <- replicateM 2 newEmptyMVar
-       testUnnecessaryConnect clientDone serverDone
-       mapM_ readMVar [ clientDone , serverDone ]       
-      
-    
+       testUnnecessaryConnectConcurrent clientDone serverDone
+       mapM_ takeMVar [ clientDone , serverDone ]       
+       putStrLn "\nClient will send 10 sequential connection"
+       testUnnecessaryConnectSequential  clientDone serverDone
+       mapM_ readMVar [ clientDone , serverDone ] 
+
+
      testCase_8 <- do 
        putStrLn "\n8-->\nTest that we can create \"many\" transport instances."
        testMany
@@ -170,84 +171,187 @@ testEarlyDisconnect clientDone serverDone  = catch go handler where
 
           return ()
 
---In this test case 10 cient send request but only one gets connection.
-testUnnecessaryConnect :: MVar () -> MVar () -> IO () 
-testUnnecessaryConnect clientDone serverDone = catch go handler where 
-  
+--  Test what happens when a remote endpoint sends a connection request to our transport for an endpoint it already has a connection to. TCP acceptes connection from one 
+--  client and if same client sends the request then it issue ConnectionRequestInvalid and other error message. TCP server accepts any connection while CCI server grants the
+--  permission to client to get accepted. If same client is sending 10 request then accept one and reject other ( I am bit skeptical about how does the internals of CCI behave 
+--  on multiple connection.) 
+
+testUnnecessaryConnectConcurrent :: MVar () -> MVar () -> IO ()
+testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
+
        handler :: SomeException -> IO ()
        handler e = putStrLn ( show e ) >> throw e
-     
-       go = do 
-           initCCI 
-           serverAddress <-  newEmptyMVar 
-           
-           --start server 
-           forkIO ( ( do
-              {-- 
-              _ <- replicateM 3 $  do 
-                   done <- newEmptyMVar 
 
-                   forkIO $ do --}
-                           endpoint  <- createPollingEndpoint Nothing
-                           getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
-          
-                           --Connection request from client. Accept the connection.
-                           pollWithEventData endpoint $ \ev ->
-                             case ev  of
-                                 EvConnectRequest sev eb attr  ->   accept sev ( 0 :: WordPtr )
-                                 _ -> fail "Some thing wrong with connection"
+       go = do
+           initCCI
+           serverAddress <-  newEmptyMVar
+           --requestfinished <- newEmptyMVar 
+       
 
-                           pollWithEventData endpoint $ \ev ->
-                             case ev of
-                                 EvAccept cid  _ -> return () 
-                                 _ -> fail "Error in connection acception sequence"
+           forkIO  ( ( do 
+              endpoint  <- createPollingEndpoint Nothing
+              getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr 
+              connAccepted <- newEmptyMVar              
+
              
-                           pollWithEventData endpoint $ \ev ->
-                             case ev of
+              --pollWithEventData will wait until events becomes available. It will always looking for events and block until events available            
+              let loop = do 
+                      pollWithEventData endpoint $ \ev -> do 
+                           case ev of
+                               EvConnectRequest sev eb attr -> do 
+                                         mv <- tryTakeMVar connAccepted 
+                                         case mv of 
+                                            Nothing -> do 
+                                                   accept sev ( 0 :: WordPtr ) 
+                                                   --putStrLn "Accepting connection"                                   
+                                            Just _ -> do 
+                                                   reject sev 
+                                                   --putStrLn "Rejecting Connection"
+                                         putMVar connAccepted ()
+                               EvRecv eventbytes  connection  -> do
+                                          msg <- packEventBytes eventbytes
+                                          BS.putStrLn msg
+                               _ -> return () 
+                   
+              {--
+              --for multiple clients throwing connection to server use getEvent
+              let loop = do 
+                    evnt <- getEvent endpoint 
+                    case evnt of 
+                          Nothing -> do 
+                                   fin <- tryTakeMVar requestfinished 
+                                   case fin of 
+                                       Nothing -> loop 
+                                       Just _ -> return () 
+                          Just s -> do 
+                               ev <- getEventData s
+                               case ev of 
+                                 EvConnectRequest sev eb attr -> do 
+                                         mv <- tryTakeMVar connAccepted 
+                                         case mv of 
+                                            Nothing -> do 
+                                                   accept sev ( 0 :: WordPtr ) 
+                                                   --putStrLn "Accepting Connection"                  
+                                            Just _ -> do 
+                                                   reject sev 
+                                                   --putStrLn "Rejecting Connection"
+                                         putMVar connAccepted ()
                                  EvRecv eventbytes  connection  -> do
-                                        msg <- packEventBytes eventbytes
-                                        BS.putStrLn msg
-                                 _ -> fail "Something wrong with this connection"
-                          {--
-                           putMVar done () 
-                   readMVar done 
-              return ()--}
-                           
-            
-                    ) `finally` putMVar serverDone () )
+                                          msg <- packEventBytes eventbytes
+                                          BS.putStrLn msg
+                                 _  -> return () 
+                    loop --}
 
-           --start  10 client thread and only one will be accepted.
+              replicateM_ 12 loop  --hit and trial. It should be 2 more than client thread( at least in this code )
+              return () 
+
+                      ) `finally` putMVar serverDone () )
+           
            forkIO ( ( do
-              _ <- replicateM 10  $ do 
-                   done <- newEmptyMVar 
-                   forkIO $ do  
-                      addr <- readMVar serverAddress               
-                      endpoint <- createPollingEndpoint Nothing
-                      --connect to server
-                      connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing
+                  
+                    tot <- replicateM 10 newEmptyMVar
+                    addr <- readMVar serverAddress
+                    --endpoint <- createPollingEndpoint Nothing --uncomment this 
+                    forM_ tot ( forkIO . \var ->  do 
+                                     
+                                    endpoint <- createPollingEndpoint Nothing -- comment this
+                                    connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing
+                                    newconnMVar  <- newEmptyMVar 
+                                    pollWithEventData endpoint $ \ev -> do 
+                                           case ev of
+                                              EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn
+                                              _ -> return () 
+                                    mv <- tryTakeMVar newconnMVar 
+                                    case mv of 
+                                             Just conn -> do 
+                                               id <- myThreadId
+                                               send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )
+                                               putMVar newconnMVar conn  
+                                               disconnect conn 
+                                             Nothing -> return ()          
+                                           
+                                    destroyEndpoint endpoint
+                                    putMVar var () 
+                               ) 
+                    mapM_ readMVar   tot 
+                    --forM_ tot $ \var -> ( traceIO . show =<< isEmptyMVar var )
+                       ) `finally` putMVar clientDone () )
+           return () 
 
-                      --server accepted the first connection.
-                      newconnMVar  <- newEmptyMVar
-                      pollWithEventData endpoint $ \ev ->
-                       case ev of
-                          EvConnect cid ( Right conn ) ->  putMVar newconnMVar conn
-                          _ -> fail "Something wrong with client"
 
-                      id <- myThreadId 
-                      conn <- readMVar newconnMVar
-                      send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )  
-                      disconnect conn 
-                      destroyEndpoint endpoint
-                      putMVar done ()
-                   --uncommenting this readMVar will block of the rest nine threads. They will try to connecet to server with any success. 
-                   --readMVar done  
+testUnnecessaryConnectSequential  :: MVar () -> MVar () -> IO () 
+testUnnecessaryConnectSequential  clientDone serverDone = catch go handler where 
+       handler :: SomeException -> IO ()
+       handler e = putStrLn ( show e ) >> throw e
 
-              return ()
+       go = do 
+               initCCI 
+               serverAddress <- newEmptyMVar 
+               --requestfinished <- newEmptyMVar 
+               --start server
+               
+               forkIO ( ( do 
+                    endpoint  <- createPollingEndpoint Nothing
+                    getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
+                    connAccepted <- newEmptyMVar    
 
-                    ) `finally` putMVar clientDone () )
+                    let loop = do
+                         pollWithEventData endpoint $ \ev -> do
+                           case ev of
+                               EvConnectRequest sev eb attr -> do
+                                         mv <- tryTakeMVar connAccepted
+                                         case mv of
+                                            Nothing -> do
+                                                   accept sev ( 0 :: WordPtr )
+                                                   --putStrLn "Accepting connection"                                    
+                                            Just _ -> do
+                                                   reject sev
+                                                   --putStrLn "Rejecting Connection"
+                                         putMVar connAccepted ()
+                               EvRecv eventbytes  connection  -> do
+                                          msg <- packEventBytes eventbytes
+                                          BS.putStrLn msg
+                               _ -> return ()
 
-           return ()
 
+                    replicateM_ 9 loop
+                    return ()
+        
+                        ) `finally` putMVar serverDone () )
+
+               --start the client
+               forkIO ( ( do 
+       
+                    
+                    addr <- readMVar serverAddress
+                    connAccepted <- newEmptyMVar 
+                    replicateM_ 7 $ do
+                                    done <- newEmptyMVar 
+                                    forkIO $ do 
+                                       endpoint <- createPollingEndpoint Nothing 
+                                       connect endpoint addr BS.empty CONN_ATTR_RO ( 0 :: WordPtr ) Nothing
+                 
+                                       pollWithEventData endpoint $ \ev -> do
+                                           case ev of
+                                              EvConnect cid ( Right conn ) ->  putMVar connAccepted  conn
+                                              _ -> return ()
+                                       mv <- tryTakeMVar connAccepted
+                                       case mv of
+                                             Just conn -> do
+                                               id <- myThreadId
+                                               send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )
+                                               disconnect conn
+                                             Nothing -> return ()
+                       
+                                       destroyEndpoint endpoint
+                                       putMVar done ()
+                                    readMVar  done 
+                              
+
+
+                        ) `finally` putMVar clientDone () )
+               return () 
+   
 
 --Test that we can create "many" transport instances.  It will throw error if not created.
 testMany :: IO () 
