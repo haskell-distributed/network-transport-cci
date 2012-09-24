@@ -184,8 +184,7 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
 
        go = do
            initCCI
-           serverAddress <-  newEmptyMVar
-           --requestfinished <- newEmptyMVar 
+           serverAddress <-  newEmptyMVar 
        
 
            forkIO  ( ( do 
@@ -193,7 +192,7 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
               getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr 
               connAccepted <- newEmptyMVar              
 
-             
+             {--            
               --pollWithEventData will wait until events becomes available. It will always looking for events and block until events available            
               let loop = do 
                       pollWithEventData endpoint $ \ev -> do 
@@ -213,16 +212,12 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
                                           BS.putStrLn msg
                                _ -> return () 
                    
-              {--
+              --}
               --for multiple clients throwing connection to server use getEvent
               let loop = do 
                     evnt <- getEvent endpoint 
                     case evnt of 
-                          Nothing -> do 
-                                   fin <- tryTakeMVar requestfinished 
-                                   case fin of 
-                                       Nothing -> loop 
-                                       Just _ -> return () 
+                          Nothing -> return () 
                           Just s -> do 
                                ev <- getEventData s
                                case ev of 
@@ -240,9 +235,9 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
                                           msg <- packEventBytes eventbytes
                                           BS.putStrLn msg
                                  _  -> return () 
-                    loop --}
+                    
 
-              replicateM_ 12 loop  --hit and trial. It should be 2 more than client thread( at least in this code )
+              replicateM_ 9000000 loop
               return () 
 
                       ) `finally` putMVar serverDone () )
@@ -266,7 +261,6 @@ testUnnecessaryConnectConcurrent clientDone serverDone = catch go handler where
                                              Just conn -> do 
                                                id <- myThreadId
                                                send  conn ( BS.pack $ "Hi Server. My thread id is " ++ show id ) ( 0 :: WordPtr )
-                                               putMVar newconnMVar conn  
                                                disconnect conn 
                                              Nothing -> return ()          
                                            
@@ -286,15 +280,14 @@ testUnnecessaryConnectSequential  clientDone serverDone = catch go handler where
 
        go = do 
                initCCI 
-               serverAddress <- newEmptyMVar 
-               --requestfinished <- newEmptyMVar 
+               serverAddress <- newEmptyMVar
                --start server
                
                forkIO ( ( do 
                     endpoint  <- createPollingEndpoint Nothing
                     getEndpt_URI endpoint >>= \addr -> putMVar serverAddress addr >> putStrLn addr
                     connAccepted <- newEmptyMVar    
-
+                    {--
                     let loop = do
                          pollWithEventData endpoint $ \ev -> do
                            case ev of
@@ -312,9 +305,30 @@ testUnnecessaryConnectSequential  clientDone serverDone = catch go handler where
                                           msg <- packEventBytes eventbytes
                                           BS.putStrLn msg
                                _ -> return ()
+                    --}
+                    let loop = do
+                          evnt <- getEvent endpoint
+                          case evnt of
+                            Nothing -> return ()
+                            Just s -> do
+                               ev <- getEventData s
+                               case ev of
+                                 EvConnectRequest sev eb attr -> do
+                                         mv <- tryTakeMVar connAccepted
+                                         case mv of
+                                            Nothing -> do
+                                                   accept sev ( 0 :: WordPtr )
+                                                   --putStrLn "Accepting Connection"                   
+                                            Just _ -> do
+                                                   reject sev
+                                                   --putStrLn "Rejecting Connection"
+                                         putMVar connAccepted ()
+                                 EvRecv eventbytes  connection  -> do
+                                          msg <- packEventBytes eventbytes
+                                          BS.putStrLn msg
+                                 _  -> return ()
 
-
-                    replicateM_ 9 loop
+                    replicateM_ 9000000 loop
                     return ()
         
                         ) `finally` putMVar serverDone () )
@@ -325,7 +339,7 @@ testUnnecessaryConnectSequential  clientDone serverDone = catch go handler where
                     
                     addr <- readMVar serverAddress
                     connAccepted <- newEmptyMVar 
-                    replicateM_ 7 $ do
+                    replicateM_ 10 $ do
                                     done <- newEmptyMVar 
                                     forkIO $ do 
                                        endpoint <- createPollingEndpoint Nothing 
