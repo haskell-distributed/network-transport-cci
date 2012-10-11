@@ -384,13 +384,13 @@ endpointLoop transport endpoint =
                                                                  rmaId=orginatingId} ->
                                              do mres <- Pool.newBuffer pool (Left rmasize) 
                                                 case mres of
-                                                  Just (newpool, buffer) ->
+                                                  Just (newpool, buffer) -> do
+                                                    localhb <- CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer)
                                                     let notify = ControlMessageAckInitRMA
                                                                {rmaAckOrginatingId=orginatingId,
-                                                                rmaAckRemote = Just (nextTransferId, 
-                                                                           CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer))}
-                                                     in do sendControlMessageInside transport endpoint conn notify
-                                                           return $ Just epls {eplsNextTransferId = nextTransferId+1,
+                                                                rmaAckRemote = Just (nextTransferId, localhb)}
+                                                    do sendControlMessageInside transport endpoint conn notify
+                                                       return $ Just epls {eplsNextTransferId = nextTransferId+1,
                                                                     eplsTransfers = Map.insert nextTransferId buffer transfers,
                                                                     eplsPool = newpool}
                                                   Nothing -> 
