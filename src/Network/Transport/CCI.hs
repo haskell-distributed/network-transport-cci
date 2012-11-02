@@ -491,7 +491,7 @@ endpointLoop transport endpoint =
                         -- Should probably kill Endpoint and move EndpointState to closed
                         return $ Just epls
               case ret of
-                 Nothing -> do -- CCI.destroyEndpoint (cciEndpoint endpoint)  -- TODO this hangs/segfaults
+                 Nothing -> do CCI.destroyEndpoint (cciEndpoint endpoint)
                                putMVar (cciEndpointFinalized endpoint) ()
                  Just newstate -> loop newstate
   in loop newEpls 
@@ -503,7 +503,7 @@ endpointLoop transport endpoint =
                            Nothing -> dbg "Bogus originating id"
                            Just myrma -> putMVar (cciRMARemoteHandle myrma) val
                       _ -> dbg "Unexpected endpoint state"
-        
+        OA
 -- | Notify CH that something happened. Usually, a connection was opened or closed or a message was received.
 putEvent :: CCIEndpoint -> Event -> IO ()
 putEvent endp ev = writeChan (cciChannel endp) ev
