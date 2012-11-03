@@ -503,7 +503,7 @@ endpointLoop transport endpoint =
                            Nothing -> dbg "Bogus originating id"
                            Just myrma -> putMVar (cciRMARemoteHandle myrma) val
                       _ -> dbg "Unexpected endpoint state"
-        OA
+
 -- | Notify CH that something happened. Usually, a connection was opened or closed or a message was received.
 putEvent :: CCIEndpoint -> Event -> IO ()
 putEvent endp ev = writeChan (cciChannel endp) ev
