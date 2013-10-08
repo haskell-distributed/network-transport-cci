@@ -35,7 +35,7 @@ import Network.Transport
 import Control.Applicative ((<*>), (<$>), pure)
 import Control.Monad (liftM, forM_, void, when)
 import Control.Concurrent.Chan
-import Control.Concurrent (forkIO, ThreadId)
+import Control.Concurrent (forkIO, ThreadId, threadDelay)
 import Control.Concurrent.MVar
 import Control.Exception
     ( catch
@@ -910,8 +910,15 @@ sendSimple :: CCI.Connection
            -> [ByteString]
            -> WordPtr
            -> IO ()
-sendSimple conn bs wp =
-     CCI.sendvSilent conn bs wp
+sendSimple conn bs wp = retryCCI_ENOBUFS $ CCI.sendvSilent conn bs wp
+
+retryCCI_ENOBUFS :: IO a -> IO a
+retryCCI_ENOBUFS action = catch action
+     $ \e@(CCI.CCIException ret) -> case ret of
+       CCI.ENOBUFS -> do -- retry a bit later if there are not enough buffers
+         threadDelay 10000
+         retryCCI_ENOBUFS action
+       _       -> throwIO e
 
 -- | 'CCI.disconnect' is a local operation; it doesn't notify the other side, so
 -- we have to. We send a control message to the other side, which unregisters
