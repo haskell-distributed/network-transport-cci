@@ -637,8 +637,10 @@ testRemoteRegistry transport = do
 
   tryRunProcess node2 $ do
     let nid1 = localNodeId node1
-    registerRemote nid1 "ping" pingServer
-    Just pid <- whereisRemote nid1 "ping"
+    registerRemoteAsync nid1 "ping" pingServer
+    RegisterReply "ping" True <- expect
+    whereisRemoteAsync nid1 "ping"
+    WhereIsReply "ping" (Just pid) <- expect
     True <- return $ pingServer == pid 
     us <- getSelfPid
     nsendRemote nid1 "ping" (Pong us)

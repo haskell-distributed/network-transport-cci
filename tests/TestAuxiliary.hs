@@ -28,7 +28,7 @@ import System.Console.ANSI ( SGR(SetColor, Reset)
 import System.Random (randomIO)
 import Control.Distributed.Process.Node (runProcess)
 import Control.Distributed.Process.Internal.Types (LocalNode,Process)
-import qualified Control.Distributed.Process.Internal.Primitives as Prim
+import qualified Control.Distributed.Process as Process ( catch )
 
 -- | Like fork, but throw exceptions in the child thread to the parent
 forkTry :: IO () -> IO ThreadId 
@@ -39,7 +39,7 @@ forkTry p = do
 tryRunProcess :: LocalNode -> Process () -> IO ()
 tryRunProcess node p = do
   tid <- liftIO myThreadId
-  runProcess node $ Prim.catch p (\e -> liftIO $ throwTo tid (e::SomeException))
+  runProcess node $ Process.catch p (\e -> liftIO $ throwTo tid (e::SomeException))
 
 -- | Like try, but specialized to SomeException
 trySome :: IO a -> IO (Either SomeException a)
