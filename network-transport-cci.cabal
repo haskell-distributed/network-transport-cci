@@ -6,7 +6,6 @@ License:       BSD3
 License-file:  LICENSE
 Copyright:     Parallel Scientific Labs, LLC.
 Maintainer:    Facundo Domìnguez <facundo.dominguez@parsci.com>
-Stability:     experimental
 Synopsis:      CCI instantation of Network.Transport
 Description:   CCI instantation of Network.Transport
 Tested-With:   GHC==7.0.4 GHC==7.2.2 GHC==7.4.1 GHC==7.4.2
