@@ -94,7 +94,7 @@ import Prelude
 --
 -- TODO avoid copying RMA buffers by using sendNoCopy and unsafeUseAsCStringLen
 
--- | Arguments given to createTransport
+-- | Arguments given to 'createTransport'.
 data CCIParameters = CCIParameters {
         -- | How long to wait, in microseconds, before deciding that an attempt
         -- to connect to a nonresponsive foreign host has failed
@@ -105,12 +105,12 @@ data CCIParameters = CCIParameters {
         -- may be wasteful
         cciReceiveStrategy :: ReceiveStrategy,
 
-        -- | Which device to use. Nothing (the default) means use the default device.
-        -- Other values can be retrieved from Network.CCI.getDevcices
+        -- | Which device to use. Nothing (the default) means use the default
+        -- device. Other values can be retrieved from Network.CCI.getDevcices
         cciDevice :: Maybe CCI.Device,
 
-        -- | The maximum number of available RMA buffers that the layer
-        -- permits before it starts releasing them
+        -- | The maximum number of available RMA buffers that the layer permits
+        -- before it starts releasing them
         cciOutstandingRMABuffers  :: Int,
 
         -- | The largest quantity of data to be sent in a single RMA chunk.
@@ -131,12 +131,12 @@ data CCITransport = CCITransport {
      }
 
 
--- | Default values to use with 'createTransport'
+-- | Default values to use with 'createTransport'.
 defaultCCIParameters :: CCIParameters
 defaultCCIParameters = CCIParameters {
-        cciConnectionTimeout = Just 10000000, -- ^ 10 second connection timeout
+        cciConnectionTimeout = Just 10000000, -- 10 second connection timeout
         cciReceiveStrategy = AlwaysPoll,
-        cciDevice = Nothing, -- ^ default device (as determined by driver)
+        cciDevice = Nothing, -- default device (as determined by driver)
         cciOutstandingRMABuffers = 10,
         cciMaxRMABuffer = 4194304
      }
@@ -185,18 +185,20 @@ data CCIConnectionState =
       CCIConnectionClosed
           deriving (Show)
 
--- | This is used as an argument to Network.Transport.TransportError
+-- | This is used as an argument to 'Network.Transport.TransportError'.
 data CCIErrorCode =
        CCICreateTransportFailed |
        CCIDisconnectFailed
        deriving (Show, Typeable, Eq)
 
 -- | In addition to regular message (which will be passed on to CH and
--- eventually to a user process), we can send control messages, which
--- will be handled by the CCI event handler.
+-- eventually to a user process), we can send control messages, which will be
+-- handled by the CCI event handler.
 data ControlMessage =
-          ControlMessageCloseConnection -- ^ Request that the given connection terminate (and notify CH)
-        | ControlMessageInitConnection Reliability EndPointAddress -- ^ Finish initializaion of the connection (and notify CH)
+          ControlMessageCloseConnection
+          -- ^ Request that the given connection terminate (and notify CH)
+        | ControlMessageInitConnection Reliability EndPointAddress
+          -- ^ Finish initializaion of the connection (and notify CH)
         | ControlMessageInitRMA {rmaSize :: Int, rmaId :: RMATransferId, rmaEndpointAddress :: String}
         | ControlMessageAckInitRMA {rmaAckOrginatingId :: RMATransferId, rmaAckRemote :: Maybe (RMATransferId, ByteString)}
         | ControlMessageFinalizeRMA {rmaOk :: Bool, rmaRemoteFinalizingId :: RMATransferId}
@@ -267,8 +269,8 @@ createTransport params =
                 closeTransport = apiCloseTransport inter
              }
 
--- TODO this should shut down all known endpoints
--- we'll need to keep a list of known endpoints, naturally
+-- TODO this should shut down all known endpoints we'll need to keep a list of
+-- known endpoints, naturally.
 apiCloseTransport :: CCITransport -> IO ()
 apiCloseTransport transport =
    modifyMVar_ (cciTransportState transport) $ \st ->
@@ -383,13 +385,11 @@ endpointLoop transport endpoint =
                             eplsPool = pool} ->
            do ret <- receiveEvent transport endpoint $ \ev ->
                 case ev of
-
-
-
--- | The connection packet will be blank, in which case this is a real
--- connection request, orit can contain magicEndpointShutdown,
--- which we interpret as an attempt to shutdown the endpoint.
--- in other cases the connection is rejected.
+                  -- The connection packet will be blank, in which case this is
+                  -- a real connection request, orit can contain
+                  -- magicEndpointShutdown, which we interpret as an attempt to
+                  -- shutdown the endpoint. in other cases the connection is
+                  -- rejected.
                   CCI.EvConnectRequest sev eb _attr ->
                       do msg <- CCI.packEventBytes eb
                          case BSC.unpack msg of
@@ -558,7 +558,8 @@ endpointLoop transport endpoint =
                            Just myrma -> putMVar (cciRMARemoteHandle myrma) val
                       _ -> dbg "Unexpected endpoint state"
 
--- | Notify CH that something happened. Usually, a connection was opened or closed or a message was received.
+-- | Notify CH that something happened. Usually, a connection was opened or
+-- closed or a message was received.
 putEvent :: CCIEndpoint -> Event -> IO ()
 putEvent endp ev = writeChan (cciChannel endp) ev
 
@@ -575,10 +576,10 @@ magicEndpointShutdown :: String
 magicEndpointShutdown = "shutdown"
 
 -- | First we shutdown individual connections. Then we send a message to the
--- endpoint's event handler by embedding a shutdown
--- request in a connection request. The request is formally rejected, but is interpreted as a kill.
--- The event handler passes on the request to CH. This is all done synchronously, as we hold a lock
--- on the endpoint for the duration.
+-- endpoint's event handler by embedding a shutdown request in a connection
+-- request. The request is formally rejected, but is interpreted as a kill. The
+-- event handler passes on the request to CH. This is all done synchronously, as
+-- we hold a lock on the endpoint for the duration.
 apiCloseEndPoint :: CCITransport -> CCIEndpoint -> IO ()
 apiCloseEndPoint transport endpoint =
    (catch closeit handler)
@@ -611,17 +612,34 @@ sendSignalByConnect transport endpoint epaddr bs =
         theerror = (TransportError ConnectTimeout "Connection reply timeout")
 
 -- | The procedure for creating a new connection is:
---   1. apiConnect(Local) creates new connection ID
---   2. apiConnect(Local) calls CCI.connect, which sends an EvConnectRequest message to the remote side
---   3. EvConnectRequest is received by remote, which creates new remote ID and calls accept
---   4. accept(Remote) sends EvAccept to remote (target) side and EvConnect to local (originating) side
---   5. When the remote side gets EvAccept, it registers the new connection with its ID
---   6. apiConnect waits for EvConnect message, after which is sends a ControlMessageInitConnection message on newly-created connection; this message contains reliability and endpoint information that is needed for the remote side to send on to CH
---   7. Future EvReceives on the Remote side (caused by receiving a message) will result in event being placed on the remote endpoint queue
-apiConnect :: CCITransport -> CCIEndpoint ->
-              EndPointAddress -> Reliability ->
-              ConnectHints ->
-              IO (Either (TransportError ConnectErrorCode) Connection)
+--
+--   1. @apiConnect(Local)@ creates new connection ID
+--
+--   2. @apiConnect(Local)@ calls 'CCI.connect', which sends an 'EvConnectRequest'
+--   message to the remote side.
+--
+--   3. 'EvConnectRequest' is received by remote, which creates new remote ID
+--   and calls 'accept'
+--
+--   4. @accept(Remote)@ sends 'EvAccept' to remote (target) side and
+--   'EvConnect' to local (originating) side
+--
+--   5. When the remote side gets 'EvAccept', it registers the new connection
+--   with its ID
+--
+--   6. 'apiConnect' waits for 'EvConnect' message, after which is sends
+--   a 'ControlMessageInitConnection' message on newly-created connection; this
+--   message contains reliability and endpoint information that is needed for
+--   the remote side to send on to CH
+--
+--   7. Future 'EvReceives' on the Remote side (caused by receiving a message)
+--   will result in event being placed on the remote endpoint queue.
+apiConnect :: CCITransport
+           -> CCIEndpoint
+           -> EndPointAddress
+           -> Reliability
+           -> ConnectHints
+           -> IO (Either (TransportError ConnectErrorCode) Connection)
 apiConnect transport endpoint remoteaddress reliability _hints =
   try $ mapCCIException (translateException ConnectFailed) $
       do (cciconn, transportconn, _cid) <- createConn
@@ -663,9 +681,10 @@ apiConnect transport endpoint remoteaddress reliability _hints =
                      helloPacket (translateReliability reliability)
                      contextId maybeTimeout
 
--- | Sending is silent (viz. CCI.SEND_SILENT). This corresponds to the Unified's preference.
--- We distinguish control messages from regular messages by the first byte: 0 for the latter, 1 for the former.
--- Since we will also use control messages to provide RMA admin, we can't send them on RMA
+-- | Sending is silent (viz. 'CCI.SEND_SILENT'). This corresponds to the
+-- Unified's preference. We distinguish control messages from regular messages
+-- by the first byte: 0 for the latter, 1 for the former. Since we will also use
+-- control messages to provide RMA admin, we can't send them on RMA.
 apiSend :: CCITransport -> CCIEndpoint -> CCIConnection -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
 apiSend transport endpoint conn bs =
   sendCore transport endpoint conn (0::WordPtr) False bs
@@ -678,8 +697,9 @@ sendControlMessageInside :: CCITransport -> CCIEndpoint -> CCI.Connection -> Con
 sendControlMessageInside _transport _endpoint conn bs =
    sendSimple conn (BSC.singleton (chr 1):BSL.toChunks (encode bs)) (0::WordPtr)
 
--- | CCI has a maximum message size of maxMessageLength. For short messages, we will send them the
--- normal way, but for longer messages we are obligated to use CCI's RMA mechanism
+-- | CCI has a maximum message size of 'maxMessageLength'. For short messages,
+-- we will send them the normal way, but for longer messages we are obligated to
+-- use CCI's RMA mechanism.
 sendCore :: CCITransport -> CCIEndpoint -> CCIConnection -> WordPtr -> Bool -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
 sendCore transport endpoint conn context isCtrlMsg bs =
   try $ mapCCIException (translateException SendFailed) $
@@ -702,25 +722,38 @@ sendCore transport endpoint conn context isCtrlMsg bs =
                         False -> BSC.singleton (chr 0)
 
 -- | For RMA transmissions, we do this:
--- 1. Allocate a local transfer ID on this endpoint
--- 2. Send an InitRMA message to the other side, along with the size of the buffer we want to send
--- 3. Remote side allocates buffer, send back an acknowledgement with its remote buffer handle and its remote transfer ID
--- 4. We move the message to a local RMA buffer, and call rmaWrite to send the data to the remote buffer
--- 5. We wait for transmission confirmation via an EvSend with our local transfer ID
--- 6. After we get confirmation, we can release the local buffer.
--- 7. The other side copies its buffers to a message, sends it to CH, and frees its buffers
+--
+--   1. Allocate a local transfer ID on this endpoint.
+--
+--   2. Send an 'InitRMA' message to the other side, along with the size of the
+--   buffer we want to send.
+--
+--   3. Remote side allocates buffer, send back an acknowledgement with its
+--   remote buffer handle and its remote transfer ID.
+--
+--   4. We move the message to a local RMA buffer, and call 'rmaWrite' to send
+--   the data to the remote buffer.
+--
+--   5. We wait for transmission confirmation via an 'EvSend' with our local
+--   transfer ID.
+--
+--   6. After we get confirmation, we can release the local buffer.
+--
+--   7. The other side copies its buffers to a message, sends it to CH, and
+--   frees its buffers.
 sendRMA :: CCITransport -> CCIEndpoint -> CCIConnection -> CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendRMA transport endpoint _conn realconn bs _ctx =
   do (rmatid,rmastate) <- newRMA
-     let -- Tell the remote side, if we can, to free the buffer corresponding to the given ID.
-         -- If ok, then the buffer should be complete, create a message from it. Otherwise,
-         -- throw it away.
+     let -- Tell the remote side, if we can, to free the buffer corresponding to
+         -- the given ID. If ok, then the buffer should be complete, create
+         -- a message from it. Otherwise, throw it away.
          freeRemoteBuffer remoteid ok = swallowException $ sendControlMessageInside transport endpoint realconn (finalizeMessage ok remoteid)
 
-         -- When we're sending the last chunk to the other side, we ask CCI to deliver
-         -- this finalization message, which is interpreted as a control message, signalling
-         -- the receiver to extract the data, send it to CH, and shut down the corresponding buffer.
-         -- The leading '\1' identifies it as a control message.
+         -- When we're sending the last chunk to the other side, we ask CCI to
+         -- deliver this finalization message, which is interpreted as a control
+         -- message, signalling the receiver to extract the data, send it to CH,
+         -- and shut down the corresponding buffer. The leading '\1' identifies
+         -- it as a control message.
          finalizeMessage ok remoteid =
                 ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
          encodedFinalization ok remoteid =
@@ -731,8 +764,8 @@ sendRMA transport endpoint _conn realconn bs _ctx =
               (\st -> return st {cciRMAState = Map.delete rmatid (cciRMAState st)})
 
          -- Coordinate RMA handles with the other side. We tell receiver how big
-         -- the complete message is. It allocates a buffer and sends us back a handle.
-         -- We wait for it, throwing if we exceed the timeout.
+         -- the complete message is. It allocates a buffer and sends us back
+         -- a handle. We wait for it, throwing if we exceed the timeout.
          getRemoteHandle =
             let maybeTimeout = fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
                 err = TransportError SendFailed "RMA partner failed to respond"
@@ -807,12 +840,12 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                                           notZero $ fromIntegral $ CCI.rmaWriteLength (cciRMAAlignments endpoint),
                                           notZero $ fromIntegral $ CCI.rmaReadLength (cciRMAAlignments endpoint)]
 
-               -- A list of chunks to send, indicated as the offset into
-               -- the buffer and size. Chunksize should be limited by
-               -- the maximum RMA buffer size (set in CCIParameters)
-               -- and maximum read/write length (gotten from RMAAlignments).
-               -- I'm not sure if we need to obey both rmaWriteLength and
-               -- rmaReadLength, but playing it safe by taking the minimum seems wise.
+               -- A list of chunks to send, indicated as the offset into the
+               -- buffer and size. Chunksize should be limited by the maximum
+               -- RMA buffer size (set in CCIParameters) and maximum read/write
+               -- length (gotten from RMAAlignments). I'm not sure if we need to
+               -- obey both rmaWriteLength and rmaReadLength, but playing it
+               -- safe by taking the minimum seems wise.
                chunks =
                    let (fullchunks,partialchunk) = (fromIntegral msgLength) `divMod` chunkSize
                        maybePartialChunk =
@@ -833,8 +866,9 @@ sendSimple :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
 sendSimple conn bs wp =
      CCI.sendvSilent conn bs wp
 
--- | CCI.disconnect is a local operation; it doesn't notify the other side, so we have to. We send a control
--- message to the other side, which unregisters and disconnects the remote endpoint, then do the same here
+-- | 'CCI.disconnect' is a local operation; it doesn't notify the other side, so
+-- we have to. We send a control message to the other side, which unregisters
+-- and disconnects the remote endpoint, then do the same here
 apiCloseConnection :: CCITransport -> CCIEndpoint -> CCIConnection -> IO ()
 apiCloseConnection transport endpoint conn =
    mapCCIException (translateException CCIDisconnectFailed) $
@@ -847,9 +881,10 @@ apiCloseConnection transport endpoint conn =
                  return newState
             _ -> dbg "Endpoint closed" >> return st
 
--- | Takes care of the work of shutting down the connection (from the originator side), including
--- sending a shutdown message to the server (target). Does not, however, update the connection
--- table in the endpoint -- use apiCloseConnection for most purposes.
+-- | Takes care of the work of shutting down the connection (from the originator
+-- side), including sending a shutdown message to the server (target). Does not,
+-- however, update the connection table in the endpoint - use
+-- 'apiCloseConnection' for most purposes.
 closeIndividualConnection :: CCITransport -> CCIEndpoint -> CCIConnection -> IO ()
 closeIndividualConnection transport endpoint conn =
               do sendControlMessage transport endpoint conn (ControlMessageCloseConnection)
@@ -880,9 +915,9 @@ receiveEvent transport endpoint f =
          receiveBlock = CCI.withEventData (cciEndpoint endpoint)
                                           (cciFileDescriptor endpoint) f
 
+-- TODO more precise translation of CCI.CCIException to TransportError
 translateException :: a -> CCI.CCIException -> TransportError a
 translateException a ex = TransportError a (show ex)
--- TODO more precise translation of CCI.CCIException to TransportError
 
 mapCCIException :: Exception e => (CCI.CCIException -> e) -> IO a -> IO a
 mapCCIException f p = catch p (throwIO . f)

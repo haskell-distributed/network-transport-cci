@@ -42,10 +42,9 @@ type BufferId = Int
 
 -- TODO call spares (somewhere??) to allocate buffers in advance of their need.
 
--- | A buffer, identified by a handle. With this handle,
--- we can deallocate with 'freeBuffer', we can get its
--- contents with 'getBufferByteString' and we can get
--- its handle value with 'getBufferHandle'
+-- | A buffer, identified by a handle. With this handle, we can deallocate with
+-- 'freeBuffer', we can get its contents with 'getBufferByteString' and we can
+-- get its handle value with 'getBufferHandle'.
 data Buffer handle = Buffer
      {
         bId :: BufferId,
@@ -55,9 +54,9 @@ data Buffer handle = Buffer
         bHandle :: handle
      }
 
--- | A collection of managed buffers, parameterized by the
--- type of the handle that is created when a buffer is
--- registered. In CCI's case, that is RMALocalHandle.
+-- | A collection of managed buffers, parameterized by the type of the handle
+-- that is created when a buffer is registered. In CCI's case, that is
+-- RMALocalHandle.
 data Pool handle = Pool
      {
         pNextId :: !BufferId,
@@ -86,11 +85,11 @@ freePool pool =
       notinuse = pAvailableBySize pool
    in mapM_ (destroyBuffer pool) (inuse++notinuse)
 
--- | Create a new pool. All buffers will be aligned at the
--- given alignment (or 0 for any alignment). Allocated, but unused
--- buffers will be harvested after the given max count. All, the
--- user provides two functions for registering and registering
--- handles, which are called when buffers are allocated and deallocated.
+-- | Create a new pool. All buffers will be aligned at the given alignment (or
+-- 0 for any alignment). Allocated, but unused buffers will be harvested after
+-- the given max count. All, the user provides two functions for registering and
+-- registering handles, which are called when buffers are allocated and
+-- deallocated.
 newPool :: Int -> Int -> (CStringLen -> IO handle) -> (handle -> IO ()) -> Pool handle
 newPool alignment maxbuffercount reg unreg =
   Pool {pNextId=0,
@@ -102,9 +101,8 @@ newPool alignment maxbuffercount reg unreg =
         pAvailableBySize=[],
         pAvailableLru=[]}
 
--- | Release the given buffer. It won't be unregistered
--- and deallocated immediately, but simply placed on the
--- available list.
+-- | Release the given buffer. It won't be unregistered and deallocated
+-- immediately, but simply placed on the available list.
 freeBuffer :: Pool handle -> Buffer handle -> IO (Pool handle)
 freeBuffer pool buffer =
   case Map.lookup (bId buffer) (pInUse pool) of
@@ -147,12 +145,11 @@ destroyBuffer pool buffer =
  do (pUnregister pool) (bHandle buffer)
     freeAligned ((bStart buffer,bSize buffer),bAllocStart buffer)
 
--- | Find an available buffer of the appropriate size, or
--- allocate a new one if such a buffer is not already allocated.
--- You will get back an updated pool and the buffer object.
--- You may provide the size of the desired buffer either as an Int
--- or as a ByteString. In the latter case, the contents of the
--- ByteString will be copied into the buffer.
+-- | Find an available buffer of the appropriate size, or allocate a new one if
+-- such a buffer is not already allocated. You will get back an updated pool and
+-- the buffer object. You may provide the size of the desired buffer either as
+-- an Int or as a ByteString. In the latter case, the contents of the ByteString
+-- will be copied into the buffer.
 newBuffer :: Pool handle -> Either Int ByteString -> IO (Maybe (Pool handle, Buffer handle))
 newBuffer pool content =
    case findAndRemove goodSize (pAvailableBySize pool) of
@@ -235,8 +232,8 @@ findAndRemove f xs = go [] xs
          go before (x:after) = go (x:before) after
 
 -- | A zero-copy alternative to getBufferByteString. The buffer is removed from
--- the pool; after this call, the Buffer object is invalid. The resulting ByteString
--- occupies the same space and will be handled normally by the gc.
+-- the pool; after this call, the Buffer object is invalid. The resulting
+-- ByteString occupies the same space and will be handled normally by the gc.
 convertBufferToByteString :: Pool handle -> Buffer handle -> IO (Pool handle, ByteString)
 convertBufferToByteString pool buffer =
    let newpool = pool {pInUse = Map.delete (bId buffer) (pInUse pool)}
