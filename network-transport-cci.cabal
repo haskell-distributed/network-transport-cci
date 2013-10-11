@@ -69,14 +69,16 @@ Test-Suite TestCCI
   Type:            exitcode-stdio-1.0
   Main-Is:         TestCCI.hs
   Build-Depends:   base >= 4.3 && < 5,
-                   network-transport >= 0.3 && < 0.4,
-                   data-accessor >= 0.2 && < 0.3,
-                   containers >= 0.4 && < 0.6,
-                   bytestring >= 0.9 && < 0.11,
-                   cci, binary >= 0.6,
-                   random >= 1.0 && < 1.1,distributed-process,
                    ansi-terminal >= 0.5 && < 0.6,
-                   mtl >= 2.0 && < 2.2
+                   binary >= 0.6,
+                   bytestring >= 0.9 && < 0.11,
+                   cci,
+                   containers >= 0.4 && < 0.6,
+                   data-accessor >= 0.2 && < 0.3,
+                   distributed-process,
+                   mtl >= 2.0 && < 2.2,
+                   network-transport >= 0.3 && < 0.4,
+                   random >= 1.0 && < 1.1
   Other-modules:   TestAuxiliary,
                    TestTransport,
                    Traced
