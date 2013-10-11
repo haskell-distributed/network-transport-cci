@@ -260,7 +260,8 @@ waitReady conn =
             Just err -> throwIO err
 
 -- | Create a transport object suitable for using with CH.
-createTransport :: CCIParameters -> IO (Either (TransportError CCIErrorCode) Transport)
+createTransport :: CCIParameters
+                -> IO (Either (TransportError CCIErrorCode) Transport)
 createTransport params =
   try $ mapCCIException (translateException CCICreateTransportFailed) $
         do CCI.initCCI
@@ -288,7 +289,8 @@ apiCloseTransport transport =
           _ -> do CCI.finalizeCCI
                   return CCITransportStateClosed
 
-apiNewEndPoint :: CCITransport -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
+apiNewEndPoint :: CCITransport
+               -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
 apiNewEndPoint transport =
   try $ mapCCIException (translateException NewEndPointFailed) $
     do (endpoint, fd) <- makeEndpoint  (cciDevice (cciParameters transport))
@@ -608,7 +610,11 @@ apiCloseEndPoint transport endpoint =
                        _ -> dbg "Endpoint already closed" >> return st
 
 
-sendSignalByConnect :: CCITransport -> CCIEndpoint -> EndPointAddress -> ByteString -> IO ()
+sendSignalByConnect :: CCITransport
+                    -> CCIEndpoint
+                    -> EndPointAddress
+                    -> ByteString
+                    -> IO ()
 sendSignalByConnect transport endpoint epaddr bs =
       timeoutMaybe someTimeout theerror go
   where go = CCI.connect (cciEndpoint endpoint)
@@ -693,22 +699,40 @@ apiConnect transport endpoint remoteaddress reliability _hints =
 -- Unified's preference. We distinguish control messages from regular messages
 -- by the first byte: 0 for the latter, 1 for the former. Since we will also use
 -- control messages to provide RMA admin, we can't send them on RMA.
-apiSend :: CCITransport -> CCIEndpoint -> CCIConnection -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
+apiSend :: CCITransport
+        -> CCIEndpoint
+        -> CCIConnection
+        -> [ByteString]
+        -> IO (Either (TransportError SendErrorCode) ())
 apiSend transport endpoint conn bs =
   sendCore transport endpoint conn (0::WordPtr) False bs
 
-sendControlMessage :: CCITransport -> CCIEndpoint -> CCIConnection -> ControlMessage -> IO (Either (TransportError SendErrorCode) ())
+sendControlMessage :: CCITransport
+                   -> CCIEndpoint
+                   -> CCIConnection
+                   -> ControlMessage
+                   -> IO (Either (TransportError SendErrorCode) ())
 sendControlMessage transport endpoint conn bs =
   sendCore transport endpoint conn (0::WordPtr) True (BSL.toChunks (encode bs)) >>= dbgEither
 
-sendControlMessageInside :: CCITransport -> CCIEndpoint -> CCI.Connection -> ControlMessage -> IO ()
+sendControlMessageInside :: CCITransport
+                         -> CCIEndpoint
+                         -> CCI.Connection
+                         -> ControlMessage
+                         -> IO ()
 sendControlMessageInside _transport _endpoint conn bs =
    sendSimple conn (BSC.singleton (chr 1):BSL.toChunks (encode bs)) (0::WordPtr)
 
 -- | CCI has a maximum message size of 'maxMessageLength'. For short messages,
 -- we will send them the normal way, but for longer messages we are obligated to
 -- use CCI's RMA mechanism.
-sendCore :: CCITransport -> CCIEndpoint -> CCIConnection -> WordPtr -> Bool -> [ByteString] -> IO (Either (TransportError SendErrorCode) ())
+sendCore :: CCITransport
+         -> CCIEndpoint
+         -> CCIConnection
+         -> WordPtr
+         -> Bool
+         -> [ByteString]
+         -> IO (Either (TransportError SendErrorCode) ())
 sendCore transport endpoint conn context isCtrlMsg bs =
   try $ mapCCIException (translateException SendFailed) $
      withMVar (cciConnectionState conn) $ \st ->
@@ -749,7 +773,13 @@ sendCore transport endpoint conn context isCtrlMsg bs =
 --
 --   7. The other side copies its buffers to a message, sends it to CH, and
 --   frees its buffers.
-sendRMA :: CCITransport -> CCIEndpoint -> CCIConnection -> CCI.Connection -> [ByteString] -> WordPtr -> IO ()
+sendRMA :: CCITransport
+        -> CCIEndpoint
+        -> CCIConnection
+        -> CCI.Connection
+        -> [ByteString]
+        -> WordPtr
+        -> IO ()
 sendRMA transport endpoint _conn realconn bs _ctx =
   do (rmatid,rmastate) <- newRMA
      let -- Tell the remote side, if we can, to free the buffer corresponding to
@@ -863,21 +893,33 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                     in genericTake fullchunks ([ (offsets,chunkSize) | offsets<-[0,chunkSize..]])
                            ++ maybePartialChunk
 
--- TODO: draw buffers from a pool of locally stored buffers, rather than registering them each time;
+-- TODO: draw buffers from a pool of locally stored buffers, rather than
+-- registering them each time;
+--
 -- TODO: test performance of alloc-on-demand versus copying into buffer pool
-withRMABuffer :: CCIEndpoint -> ByteString -> CCI.RMA_MODE -> (CCI.RMALocalHandle -> IO a) -> IO a
+withRMABuffer :: CCIEndpoint
+              -> ByteString
+              -> CCI.RMA_MODE
+              -> (CCI.RMALocalHandle -> IO a) -> IO a
 withRMABuffer endpoint bs mode f =
-   unsafeUseAsCStringLen bs $ \cstr -> -- TODO this buffer should be aligned (to something)
+   unsafeUseAsCStringLen bs $ \cstr ->
+       -- TODO this buffer should be aligned (to something)
        CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
 
-sendSimple :: CCI.Connection -> [ByteString] -> WordPtr -> IO ()
+sendSimple :: CCI.Connection
+           -> [ByteString]
+           -> WordPtr
+           -> IO ()
 sendSimple conn bs wp =
      CCI.sendvSilent conn bs wp
 
 -- | 'CCI.disconnect' is a local operation; it doesn't notify the other side, so
 -- we have to. We send a control message to the other side, which unregisters
 -- and disconnects the remote endpoint, then do the same here
-apiCloseConnection :: CCITransport -> CCIEndpoint -> CCIConnection -> IO ()
+apiCloseConnection :: CCITransport
+                   -> CCIEndpoint
+                   -> CCIConnection
+                   -> IO ()
 apiCloseConnection transport endpoint conn =
    mapCCIException (translateException CCIDisconnectFailed) $
       modifyMVar_ (cciEndpointState endpoint) $ \st ->
@@ -893,7 +935,10 @@ apiCloseConnection transport endpoint conn =
 -- side), including sending a shutdown message to the server (target). Does not,
 -- however, update the connection table in the endpoint - use
 -- 'apiCloseConnection' for most purposes.
-closeIndividualConnection :: CCITransport -> CCIEndpoint -> CCIConnection -> IO ()
+closeIndividualConnection :: CCITransport
+                          -> CCIEndpoint
+                          -> CCIConnection
+                          -> IO ()
 closeIndividualConnection transport endpoint conn =
               do sendControlMessage transport endpoint conn (ControlMessageCloseConnection)
                  transportconn <- modifyMVar (cciConnectionState conn) $ \connst ->
@@ -912,9 +957,10 @@ translateReliability ReliableOrdered = CCI.CONN_ATTR_RO
 translateReliability ReliableUnordered = CCI.CONN_ATTR_RU
 translateReliability Unreliable = CCI.CONN_ATTR_UU
 
-receiveEvent :: CCITransport -> CCIEndpoint ->
-                (forall s. CCI.EventData s -> IO a) ->
-                IO a
+receiveEvent :: CCITransport
+             -> CCIEndpoint
+             -> (forall s. CCI.EventData s -> IO a)
+             -> IO a
 receiveEvent transport endpoint f =
    case cciReceiveStrategy (cciParameters transport) of
      AlwaysPoll -> receivePoll
