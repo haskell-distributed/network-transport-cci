@@ -947,7 +947,7 @@ closeIndividualConnection :: CCITransport
                           -> CCIConnection
                           -> IO ()
 closeIndividualConnection transport endpoint conn =
-              do sendControlMessage transport endpoint conn (ControlMessageCloseConnection)
+              do -- sendControlMessage transport endpoint conn (ControlMessageCloseConnection)
                  transportconn <- modifyMVar (cciConnectionState conn) $ \connst ->
                     case connst of
                       CCIConnectionConnected {cciConnection=realconn} ->
@@ -957,7 +957,13 @@ closeIndividualConnection transport endpoint conn =
                       CCIConnectionInit -> dbg "Connection still initializing"  >>
                          return (CCIConnectionClosed,Nothing)
                  -- putEvent endpoint (ConnectionClosed $ cciConnectionId conn) -- I am also pretty sure this line is not necessary
-                 maybe (return ()) CCI.disconnect transportconn
+                 flip (maybe (return ())) transportconn $ \cciConn -> do
+                   retryCCI_ENOBUFS $ CCI.sendvBlocking cciConn
+                       ( BSC.singleton (chr 1)
+                       : BSL.toChunks (encode ControlMessageCloseConnection)
+                       )
+                       0
+                   CCI.disconnect cciConn
 
 translateReliability :: Reliability -> CCI.ConnectionAttributes
 translateReliability ReliableOrdered = CCI.CONN_ATTR_RO
