@@ -97,20 +97,20 @@ import Prelude
 -- | Arguments given to 'createTransport'.
 data CCIParameters = CCIParameters
     { -- | How long to wait, in microseconds, before deciding that an attempt to
-      -- connect to a nonresponsive foreign host has failed
+      -- connect to a nonresponsive foreign host has failed.
       cciConnectionTimeout :: Maybe Word64
 
       -- | The mechanism by which messages are retrieved from the CCI queue
       -- Polling (the default) will probably result in better performance but
-      -- may be wasteful
+      -- may be wasteful.
     , cciReceiveStrategy :: ReceiveStrategy
 
-      -- | Which device to use. Nothing (the default) means use the default
-      -- device. Other values can be retrieved from Network.CCI.getDevcices
+      -- | Which device to use. 'Nothing' (the default) means use the default
+      -- device. Other values can be retrieved from 'Network.CCI.getDevcices'.
     , cciDevice :: Maybe CCI.Device
 
       -- | The maximum number of available RMA buffers that the layer permits
-      -- before it starts releasing them
+      -- before it starts releasing them.
     , cciOutstandingRMABuffers  :: Int
 
       -- | The largest quantity of data to be sent in a single RMA chunk.
