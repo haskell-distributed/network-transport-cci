@@ -16,23 +16,27 @@ module Network.Transport.CCI.Pool
   , convertBufferToByteString
   ) where
 
-import Prelude hiding (catch)
-import Control.Exception (catch, IOException)
+import Network.Transport.CCI.ByteString (unsafePackMallocCStringLen)
+
 import Control.Applicative ((<$>))
+import Control.Exception (catch, IOException)
+
 import Data.Map (Map)
 import qualified Data.Map as Map
-import Foreign.C.Types (CChar)
-import Foreign.Ptr (Ptr,alignPtr)
-import Foreign.Marshal.Alloc (mallocBytes, free)
-import Foreign.Marshal.Utils (copyBytes)
-import Foreign.C.String (CStringLen)
-import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
-import qualified Data.List as List (find, delete, deleteBy, insertBy)
+
 import qualified Data.ByteString.Char8 as BSC
 import Data.ByteString.Char8 (ByteString)
-import Data.Ord (comparing)
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+
+import qualified Data.List as List (find, delete, deleteBy, insertBy)
 import Data.Maybe (fromJust)
-import Network.Transport.CCI.ByteString (unsafePackMallocCStringLen)
+import Data.Ord (comparing)
+import Foreign.C.Types (CChar)
+import Foreign.C.String (CStringLen)
+import Foreign.Marshal.Alloc (mallocBytes, free)
+import Foreign.Marshal.Utils (copyBytes)
+import Foreign.Ptr (Ptr,alignPtr)
+import Prelude
 
 type BufferId = Int
 

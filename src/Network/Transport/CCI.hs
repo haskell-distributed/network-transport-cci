@@ -11,30 +11,69 @@ module Network.Transport.CCI
   , ReceiveStrategy(..)
   ) where
 
-import Control.Applicative ((<*>),(<$>),pure)
+import qualified Network.Transport.CCI.Pool as Pool
+
+import qualified Network.CCI as CCI
+import Network.Transport.Internal (timeoutMaybe)
+import Network.Transport
+    ( Transport(..)
+    , TransportError(..)
+    , NewEndPointErrorCode(..)
+    , EndPointAddress(..)
+    , Event(..)
+    , TransportError
+    , ConnectErrorCode(..)
+    , EndPoint(..)
+    , SendErrorCode(..)
+    , NewMulticastGroupErrorCode(..)
+    , ResolveMulticastGroupErrorCode(..)
+    , Reliability(..)
+    , ConnectHints(..)
+    , Connection(..)
+    , ConnectionId
+    )
+import Control.Applicative ((<*>), (<$>), pure)
 import Control.Monad (liftM, forM_, when)
 import Control.Concurrent.Chan
-import Data.Maybe (catMaybes)
-import Data.List (genericTake)
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.MVar
-import Control.Exception (catch, bracketOnError, try, SomeException, throw, throwIO, Exception, finally)
-import Data.Binary (Binary,put,get,getWord8, putWord8, encode,decode)
+import Control.Exception
+    ( catch
+    , bracketOnError
+    , try
+    , SomeException
+    , throw
+    , throwIO
+    , Exception
+    , finally
+    )
+
+import System.Posix.Types (Fd)
+
+import qualified Data.Map as Map
+
+import Data.Binary
+    ( Binary
+    , put
+    , get
+    , getWord8
+    , putWord8
+    , encode
+    , decode
+    )
+
 import Data.ByteString (ByteString)
-import Data.Char (chr,ord)
+import qualified Data.ByteString.Char8 as BSC
+import qualified Data.ByteString.Lazy as BSL (toChunks, fromChunks)
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+
+import Data.Char (chr, ord)
+import Data.List (genericTake)
+import Data.Maybe (catMaybes)
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
-import Network.CCI (WordPtr)
-import Network.Transport.Internal (timeoutMaybe)
-import Network.Transport (Transport(..), TransportError(..), NewEndPointErrorCode(..), EndPointAddress(..), Event(..), TransportError, ConnectErrorCode(..), EndPoint(..), SendErrorCode(..), NewMulticastGroupErrorCode(..), ResolveMulticastGroupErrorCode(..), Reliability(..), ConnectHints(..), Connection(..), ConnectionId)
-import Prelude hiding (catch)
-import qualified Data.ByteString.Char8 as BSC (concat, head, tail, singleton,pack, unpack, empty, length)
-import qualified Data.ByteString.Lazy as BSL (toChunks,fromChunks)
-import qualified Data.Map as Map
-import qualified Network.CCI as CCI (strError, rmaHandle2ByteString,createRMARemoteHandle,withRMALocalHandle, rmaRegister, rmaDeregister, rmaWrite, RMA_MODE(..), RMA_FLAG(..), RMARemoteHandle, RMALocalHandle, accept, reject, createPollingEndpoint, createBlockingEndpoint, Endpoint, Device, initCCI, finalizeCCI, CCIException(..), getEndpt_URI, destroyEndpoint, connect, ConnectionAttributes(..), EventData(..), packEventBytes, Connection, pollWithEventData, withEventData, connMaxSendSize, sendvSilent, disconnect,setEndpt_KeepAliveTimeout,getEndpt_RMAAlign,RMAAlignments(..),Status(..))
-import System.Posix.Types (Fd)
-import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
-import qualified Network.Transport.CCI.Pool as Pool
+import Foreign.Ptr (WordPtr)
+import Prelude
 
 -- TODO: wait for ORNL to implement keepalive timeout, extend CCIParameters to support other endpoint options
 -- TODO: use CCI.strError to display better exceptions
