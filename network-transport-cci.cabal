@@ -10,6 +10,10 @@ Synopsis:      CCI instantation of Network.Transport
 Description:   CCI instantation of Network.Transport
 Category:      Network
 
+Source-Repository head
+  Type: git
+  Location: https://github.com/ps-labs/network-transport-cci
+
 Library
   Build-Depends:   base >= 4.3 && < 5,
                    network-transport >= 0.2 && < 0.3,
