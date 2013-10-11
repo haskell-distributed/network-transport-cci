@@ -1,10 +1,10 @@
--- |CCI.hs
+-- |
+-- Copyright : (C) 2012-2013 Parallel Scientific Labs, LLC.
+-- License   : BSD3
 --
--- Copyright (C) 2012 Parallel Scientific, Inc
--- Please see the accompanying LICENSE file or contact Parallel Scientific, Inc for licensing details.
---
--- Cloud Haskell backend supporting CCI, via CCI bindings
-module Network.Transport.CCI 
+-- Cloud Haskell backend supporting CCI, via CCI bindings.
+
+module Network.Transport.CCI
   (
      createTransport,
      CCIParameters(..),

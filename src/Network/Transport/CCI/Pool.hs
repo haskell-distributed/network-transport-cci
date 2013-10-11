@@ -1,9 +1,9 @@
--- |Pool.hs
+-- |
+-- Copyright : (C) 2012-2013 Parallel Scientific Labs, LLC.
+-- License   : BSD3
 --
--- Copyright (C) 2012 Parallel Scientific, Inc
--- Please see the accompanying LICENSE file or contact Parallel Scientific, Inc for licensing details.
---
--- Support for managing pools of CCI transfer buffers
+-- Support for managing pools of CCI transfer buffers.
+
 module Network.Transport.CCI.Pool
   (
     Pool,
