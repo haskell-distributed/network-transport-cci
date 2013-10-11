@@ -16,11 +16,12 @@ Source-Repository head
 
 Library
   Build-Depends:   base >= 4.3 && < 5,
-                   network-transport >= 0.2 && < 0.3,
-                   data-accessor >= 0.2 && < 0.3,
+                   binary >= 0.5,
+                   cci >= 0.2.0,
                    containers >= 0.4 && < 0.6,
-                   bytestring >= 0.9 && < 0.11,
-                   cci >= 0.2.0, binary >= 0.5
+                   data-accessor >= 0.2 && < 0.3,
+                   network-transport >= 0.3 && < 0.4,
+                   bytestring >= 0.9 && < 0.11
   Exposed-modules: Network.Transport.CCI
   Extensions:      DeriveDataTypeable, Rank2Types
   ghc-options:     -Wall -fno-warn-unused-do-bind
