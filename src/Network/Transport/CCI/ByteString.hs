@@ -18,5 +18,3 @@ unsafePackMallocCStringLen :: CStringLen -> IO ByteString
 unsafePackMallocCStringLen (cstr, len) = do
     fp <- newForeignPtr c_free_finalizer (castPtr cstr)
     return $! PS fp 0 len
-
-	

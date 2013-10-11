@@ -102,9 +102,9 @@ newPool alignment maxbuffercount reg unreg =
 -- and deallocated immediately, but simply placed on the
 -- available list.
 freeBuffer :: Pool handle -> Buffer handle -> IO (Pool handle)
-freeBuffer pool buffer = 
+freeBuffer pool buffer =
   case Map.lookup (bId buffer) (pInUse pool) of
-    Just buf | bSize buf == bSize buffer -> 
+    Just buf | bSize buf == bSize buffer ->
        let newpool = pool {
                        pInUse = Map.delete (bId buffer) (pInUse pool),
                        pAvailableBySize = List.insertBy (comparing bSize) buffer (pAvailableBySize pool),
@@ -116,18 +116,18 @@ freeBuffer pool buffer =
 -- | Allocate excess buffers up to our limit
 spares :: Pool handle -> Int -> IO (Pool handle)
 spares pool defaultsize =
-  if (pMaxBufferCount pool > length (pAvailableLru pool)) 
+  if (pMaxBufferCount pool > length (pAvailableLru pool))
      then do res <- newBuffer pool (Left defaultsize)
              case res of
                 Just (newpool, newbuf) ->
-                    freeBuffer newpool newbuf   
+                    freeBuffer newpool newbuf
                 Nothing -> return pool
      else return pool
 
 -- | Remove and destroy excess buffers beyond our limit
 cleanup :: Pool handle -> IO (Pool handle)
 cleanup pool =
-  if (pMaxBufferCount pool < length (pAvailableLru pool)) 
+  if (pMaxBufferCount pool < length (pAvailableLru pool))
      then
         let killme = let killmeId = last (pAvailableLru pool)
                       in fromJust $ List.find (\b -> bId b == killmeId) (pAvailableBySize pool)
@@ -135,7 +135,7 @@ cleanup pool =
                              pAvailableBySize = List.deleteBy byId killme (pAvailableBySize pool)}
          in do destroyBuffer pool killme
                return newpool
-     else return pool 
+     else return pool
     where byId a b = bId a == bId b
 
 destroyBuffer :: Pool handle -> Buffer handle -> IO ()
@@ -150,7 +150,7 @@ destroyBuffer pool buffer =
 -- or as a ByteString. In the latter case, the contents of the
 -- ByteString will be copied into the buffer.
 newBuffer :: Pool handle -> Either Int ByteString -> IO (Maybe (Pool handle, Buffer handle))
-newBuffer pool content = 
+newBuffer pool content =
    case findAndRemove goodSize (pAvailableBySize pool) of
       (_newavailable,Nothing) ->
          do mres <- allocAligned' (pAlign pool) (neededSize content)
@@ -162,11 +162,11 @@ newBuffer pool content =
                     copyTo bs start
                   Left _ -> return ()
                 handle <- (pRegister pool) cstr
-                let newbuf = 
+                let newbuf =
                        Buffer {
                          bId = pNextId pool,
                          bAllocStart = allocstart,
-                         bStart = start,	
+                         bStart = start,
                          bSize = neededSize content,
                          bHandle = handle
                       }
@@ -177,7 +177,7 @@ newBuffer pool content =
                 cleanpool <- cleanup newpool -- We remove at most unused buffer beyond the limit here.
                                              -- We don't want to constnatly alloc/dealloc a same-sized buffer, so we go gradual.
                 return $ Just (cleanpool, newbuf)
-      (newavailable,Just buf) -> 
+      (newavailable,Just buf) ->
          let newpool = pool {pAvailableBySize = newavailable,
                              pInUse = Map.insert (bId buf) buf (pInUse pool),
                              pAvailableLru = List.delete (bId buf) (pAvailableLru pool)}
@@ -207,7 +207,7 @@ allocAligned align size =
 
 copyTo :: ByteString -> Ptr CChar -> IO ()
 copyTo bs pstr =
-   unsafeUseAsCStringLen bs $ \(cs,_) -> 
+   unsafeUseAsCStringLen bs $ \(cs,_) ->
        copyBytes pstr cs (BSC.length bs)
 
 {-
@@ -234,7 +234,7 @@ findAndRemove f xs = go [] xs
 -- the pool; after this call, the Buffer object is invalid. The resulting ByteString
 -- occupies the same space and will be handled normally by the gc.
 convertBufferToByteString :: Pool handle -> Buffer handle -> IO (Pool handle, ByteString)
-convertBufferToByteString pool buffer = 
+convertBufferToByteString pool buffer =
    let newpool = pool {pInUse = Map.delete (bId buffer) (pInUse pool)}
     in do (pUnregister pool) (bHandle buffer)
           bs <- unsafePackMallocCStringLen (bStart buffer, bSize buffer)
