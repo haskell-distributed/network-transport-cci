@@ -33,7 +33,7 @@ import Network.Transport
     , ConnectionId
     )
 import Control.Applicative ((<*>), (<$>), pure)
-import Control.Monad (liftM, forM_, when)
+import Control.Monad (liftM, forM_, void, when)
 import Control.Concurrent.Chan
 import Control.Concurrent (forkIO, ThreadId)
 import Control.Concurrent.MVar
@@ -980,6 +980,3 @@ swallowException :: IO () -> IO ()
 swallowException a = a `catch` handler
   where handler :: SomeException -> IO ()
         handler _ = return ()
-
-void :: Monad m => m a -> m ()
-void m = m >> return ()
