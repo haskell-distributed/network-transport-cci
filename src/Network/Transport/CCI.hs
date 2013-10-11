@@ -95,126 +95,134 @@ import Prelude
 -- TODO avoid copying RMA buffers by using sendNoCopy and unsafeUseAsCStringLen
 
 -- | Arguments given to 'createTransport'.
-data CCIParameters = CCIParameters {
-        -- | How long to wait, in microseconds, before deciding that an attempt
-        -- to connect to a nonresponsive foreign host has failed
-        cciConnectionTimeout :: Maybe Word64,
+data CCIParameters = CCIParameters
+    { -- | How long to wait, in microseconds, before deciding that an attempt to
+      -- connect to a nonresponsive foreign host has failed
+      cciConnectionTimeout :: Maybe Word64
 
-        -- | The mechanism by which messages are retrieved from the CCI queue
-        -- Polling (the default) will probably result in better performance but
-        -- may be wasteful
-        cciReceiveStrategy :: ReceiveStrategy,
+      -- | The mechanism by which messages are retrieved from the CCI queue
+      -- Polling (the default) will probably result in better performance but
+      -- may be wasteful
+    , cciReceiveStrategy :: ReceiveStrategy
 
-        -- | Which device to use. Nothing (the default) means use the default
-        -- device. Other values can be retrieved from Network.CCI.getDevcices
-        cciDevice :: Maybe CCI.Device,
+      -- | Which device to use. Nothing (the default) means use the default
+      -- device. Other values can be retrieved from Network.CCI.getDevcices
+    , cciDevice :: Maybe CCI.Device
 
-        -- | The maximum number of available RMA buffers that the layer permits
-        -- before it starts releasing them
-        cciOutstandingRMABuffers  :: Int,
+      -- | The maximum number of available RMA buffers that the layer permits
+      -- before it starts releasing them
+    , cciOutstandingRMABuffers  :: Int
 
-        -- | The largest quantity of data to be sent in a single RMA chunk.
-        cciMaxRMABuffer :: Word32
-     } --TODO add an authorization key to be sent during connecting
+      -- | The largest quantity of data to be sent in a single RMA chunk.
+    , cciMaxRMABuffer :: Word32
+     } -- TODO add an authorization key to be sent during connecting
 
-data ReceiveStrategy =
-        AlwaysPoll
-      | AlwaysBlock
+data ReceiveStrategy
+    = AlwaysPoll
+    | AlwaysBlock
 
-data CCITransportState =
-     CCITransportStateValid |
-     CCITransportStateClosed
+data CCITransportState
+    = CCITransportStateValid
+    | CCITransportStateClosed
 
-data CCITransport = CCITransport {
-        cciParameters :: CCIParameters,
-        cciTransportState :: MVar CCITransportState
-     }
-
+data CCITransport = CCITransport
+    { cciParameters     :: CCIParameters
+    , cciTransportState :: MVar CCITransportState
+    }
 
 -- | Default values to use with 'createTransport'.
 defaultCCIParameters :: CCIParameters
-defaultCCIParameters = CCIParameters {
-        cciConnectionTimeout = Just 10000000, -- 10 second connection timeout
-        cciReceiveStrategy = AlwaysPoll,
-        cciDevice = Nothing, -- default device (as determined by driver)
-        cciOutstandingRMABuffers = 10,
-        cciMaxRMABuffer = 4194304
-     }
+defaultCCIParameters = CCIParameters
+    { cciConnectionTimeout = Just 10000000       -- 10 second connection timeout
+    , cciReceiveStrategy = AlwaysPoll
+    , cciDevice = Nothing            -- default device (as determined by driver)
+    , cciOutstandingRMABuffers = 10
+    , cciMaxRMABuffer = 4194304
+    }
 
 data CCIEndpoint = CCIEndpoint
-   {
-      cciFileDescriptor :: Fd,
-      cciEndpoint :: CCI.Endpoint,
-      cciChannel :: Chan Event,
-      cciUri :: String,
-      cciTransportEndpoint :: EndPoint,
-      cciRMAAlignments :: CCI.RMAAlignments,
-      cciEndpointState :: MVar CCIEndpointState,
-      cciEndpointFinalized :: MVar ()
-   }
+    { cciFileDescriptor :: Fd
+    , cciEndpoint :: CCI.Endpoint
+    , cciChannel :: Chan Event
+    , cciUri :: String
+    , cciTransportEndpoint :: EndPoint
+    , cciRMAAlignments :: CCI.RMAAlignments
+    , cciEndpointState :: MVar CCIEndpointState
+    , cciEndpointFinalized :: MVar ()
+    }
 
 type RMATransferId = Int
 
-data CCIEndpointState = CCIEndpointValid {
-                          cciNextConnectionId :: !ConnectionId,
-                          cciEndpointThread :: ThreadId,
-                          cciRMAState :: Map.Map RMATransferId CCIRMAState, -- TODO IntMap
-                          cciRMANextTransferId :: !RMATransferId,
-                          cciConnectionsById :: Map.Map ConnectionId CCIConnection -- TODO IntMap
-                        } | CCIEndpointClosed
+data CCIEndpointState
+    = CCIEndpointValid
+      { cciNextConnectionId :: !ConnectionId
+      , cciEndpointThread :: ThreadId
+      , cciRMAState :: Map.Map RMATransferId CCIRMAState -- TODO IntMap
+      , cciRMANextTransferId :: !RMATransferId
+      , cciConnectionsById :: Map.Map ConnectionId CCIConnection -- TODO IntMap
+      }
+    | CCIEndpointClosed
 
-data CCIRMAState = CCIRMAState {
-        cciRMARemoteHandle :: MVar (Maybe (CCI.RMARemoteHandle,RMATransferId)),
-        cciOutstandingChunks :: Int,
-        cciRMAComplete :: MVar CCI.Status
-     }
+data CCIRMAState = CCIRMAState
+    { cciRMARemoteHandle :: MVar (Maybe (CCI.RMARemoteHandle,RMATransferId))
+    , cciOutstandingChunks :: Int
+    , cciRMAComplete :: MVar CCI.Status
+    }
 
 data CCIConnection = CCIConnection
-   {
-      cciConnectionState :: MVar CCIConnectionState,
-      cciReady :: MVar (Maybe (TransportError ConnectErrorCode)),
-      cciConnectionId :: ConnectionId
-   }
+    { cciConnectionState :: MVar CCIConnectionState
+    , cciReady :: MVar (Maybe (TransportError ConnectErrorCode))
+    , cciConnectionId :: ConnectionId
+    }
 
-data CCIConnectionState =
-      CCIConnectionInit |
-      CCIConnectionConnected
-          { cciConnection :: CCI.Connection,
-            cciMaxSendSize :: Word32
-          } |
-      CCIConnectionClosed
-          deriving (Show)
+data CCIConnectionState
+    = CCIConnectionInit
+    | CCIConnectionConnected
+      { cciConnection :: CCI.Connection
+      , cciMaxSendSize :: Word32
+      }
+    | CCIConnectionClosed
+    deriving (Show)
 
 -- | This is used as an argument to 'Network.Transport.TransportError'.
-data CCIErrorCode =
-       CCICreateTransportFailed |
-       CCIDisconnectFailed
-       deriving (Show, Typeable, Eq)
+data CCIErrorCode
+    = CCICreateTransportFailed
+    | CCIDisconnectFailed
+    deriving (Show, Typeable, Eq)
 
 -- | In addition to regular message (which will be passed on to CH and
 -- eventually to a user process), we can send control messages, which will be
 -- handled by the CCI event handler.
-data ControlMessage =
-          ControlMessageCloseConnection
-          -- ^ Request that the given connection terminate (and notify CH)
-        | ControlMessageInitConnection Reliability EndPointAddress
-          -- ^ Finish initializaion of the connection (and notify CH)
-        | ControlMessageInitRMA {rmaSize :: Int, rmaId :: RMATransferId, rmaEndpointAddress :: String}
-        | ControlMessageAckInitRMA {rmaAckOrginatingId :: RMATransferId, rmaAckRemote :: Maybe (RMATransferId, ByteString)}
-        | ControlMessageFinalizeRMA {rmaOk :: Bool, rmaRemoteFinalizingId :: RMATransferId}
-          deriving (Typeable)
+data ControlMessage
+    = ControlMessageCloseConnection
+      -- ^ Request that the given connection terminate (and notify CH)
+    | ControlMessageInitConnection Reliability EndPointAddress
+      -- ^ Finish initializaion of the connection (and notify CH)
+    | ControlMessageInitRMA
+      { rmaSize :: Int
+      , rmaId :: RMATransferId
+      , rmaEndpointAddress :: String
+      }
+    | ControlMessageAckInitRMA
+      { rmaAckOrginatingId :: RMATransferId
+      , rmaAckRemote :: Maybe (RMATransferId, ByteString)
+      }
+    | ControlMessageFinalizeRMA
+      { rmaOk :: Bool
+      , rmaRemoteFinalizingId :: RMATransferId }
+    deriving (Typeable)
 
 -- This really belongs in Network.Transport
 instance Binary Reliability where
-   put ReliableOrdered = putWord8 0
-   put ReliableUnordered  = putWord8 1
-   put Unreliable = putWord8 2
-   get = do hdr <- getWord8
-            case hdr of
-               0 -> return ReliableOrdered
-               1 -> return ReliableUnordered
-               2 -> return Unreliable
-               _ -> fail "Reliability.get: invalid"
+  put ReliableOrdered = putWord8 0
+  put ReliableUnordered  = putWord8 1
+  put Unreliable = putWord8 2
+  get = do hdr <- getWord8
+           case hdr of
+              0 -> return ReliableOrdered
+              1 -> return ReliableUnordered
+              2 -> return Unreliable
+              _ -> fail "Reliability.get: invalid"
 
 instance Binary ControlMessage where
   put ControlMessageCloseConnection = putWord8 0
