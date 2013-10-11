@@ -75,14 +75,24 @@ import Data.Word (Word32, Word64)
 import Foreign.Ptr (WordPtr)
 import Prelude
 
--- TODO: wait for ORNL to implement keepalive timeout, extend CCIParameters to support other endpoint options
+-- TODO: wait for ORNL to implement keepalive timeout, extend CCIParameters to
+-- support other endpoint options
+--
 -- TODO: use CCI.strError to display better exceptions
--- TODO: use Transport.ErrorEvent (esp. ConnectionLost) in response to bogus requests; throw $ userError when shutting down transport or endpoint
+--
+-- TODO: use Transport.ErrorEvent (esp. ConnectionLost) in response to bogus
+-- requests; throw $ userError when shutting down transport or endpoint
+--
 -- TODO: test UU/RU mode
--- CCI explodes after about 1000 connections; should I use virtual connections, as the TCP version does?
--- TODO add exception handling todo CCI's eventHandler, make sure that thrown exceptions kill the endpoint cleanly, and notify CH; handle out of memory errors from getBuffer elegantly
+--
+-- CCI explodes after about 1000 connections; should I use virtual connections,
+-- as the TCP version does?
+--
+-- TODO add exception handling todo CCI's eventHandler, make sure that thrown
+-- exceptions kill the endpoint cleanly, and notify CH; handle out of memory
+-- errors from getBuffer elegantly
+--
 -- TODO avoid copying RMA buffers by using sendNoCopy and unsafeUseAsCStringLen
-
 
 -- | Arguments given to createTransport
 data CCIParameters = CCIParameters {

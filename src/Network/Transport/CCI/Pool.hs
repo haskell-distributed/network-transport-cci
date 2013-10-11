@@ -40,7 +40,7 @@ import Prelude
 
 type BufferId = Int
 
--- TODO call spares (somewhwhere??) to allocate buffers in advance of their need
+-- TODO call spares (somewhere??) to allocate buffers in advance of their need.
 
 -- | A buffer, identified by a handle. With this handle,
 -- we can deallocate with 'freeBuffer', we can get its
