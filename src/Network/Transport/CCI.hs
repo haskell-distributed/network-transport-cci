@@ -5,11 +5,10 @@
 -- Cloud Haskell backend supporting CCI, via CCI bindings.
 
 module Network.Transport.CCI
-  (
-     createTransport,
-     CCIParameters(..),
-     defaultCCIParameters,
-     ReceiveStrategy(..)
+  ( createTransport
+  , CCIParameters(..)
+  , defaultCCIParameters
+  , ReceiveStrategy(..)
   ) where
 
 import Control.Applicative ((<*>),(<$>),pure)

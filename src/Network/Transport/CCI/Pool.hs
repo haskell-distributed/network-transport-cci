@@ -5,16 +5,15 @@
 -- Support for managing pools of CCI transfer buffers.
 
 module Network.Transport.CCI.Pool
-  (
-    Pool,
-    Buffer,
-    newPool,
-    freePool,
-    newBuffer,
-    freeBuffer,
-    getBufferHandle,
-    getBufferByteString,
-    convertBufferToByteString
+  ( Pool
+  , Buffer
+  , newPool
+  , freePool
+  , newBuffer
+  , freeBuffer
+  , getBufferHandle
+  , getBufferByteString
+  , convertBufferToByteString
   ) where
 
 import Prelude hiding (catch)
