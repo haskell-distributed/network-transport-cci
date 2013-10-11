@@ -288,6 +288,12 @@ dbgEither ret = return ret
 dbg :: Show a => a -> IO ()
 dbg = print
 
+fromConnectionId :: ConnectionId -> WordPtr
+fromConnectionId = toEnum . fromIntegral
+
+toConnectionId :: WordPtr -> ConnectionId
+toConnectionId = fromIntegral . fromEnum
+
 endpointHandler :: MVar (CCITransport, CCIEndpoint) -> IO ()
 endpointHandler mv =
    do (transport, endpoint) <- takeMVar mv
@@ -338,7 +344,7 @@ endpointLoop transport endpoint =
                   CCI.EvConnectRequest sev eb _attr ->
                       do msg <- CCI.packEventBytes eb
                          case BSC.unpack msg of
-                            [] -> do CCI.accept sev (toEnum nextConnectionId)
+                            [] -> do CCI.accept sev $ fromConnectionId nextConnectionId
                                      return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                             shutdown | shutdown == magicEndpointShutdown ->
                                   do CCI.reject sev
@@ -442,8 +448,8 @@ endpointLoop transport endpoint =
                          modifyMVar_ (cciEndpointState endpoint) $ \st ->
                            case st of
                              CCIEndpointValid {cciConnectionsById = connections} ->
-                               let theconn = Map.lookup (fromEnum connectionId) connections -- this conversion (WordPtr to ConnectionId) is probably okay
-                                   newmap = Map.delete (fromEnum connectionId) connections
+                               let theconn = Map.lookup (toConnectionId connectionId) connections -- this conversion (WordPtr to ConnectionId) is probably okay
+                                   newmap = Map.delete (toConnectionId connectionId) connections
                                 in maybe (dbg $ "Connection " ++ show connectionId ++ " failed because " ++ statusMsg)
                                          (\tc -> putMVar (cciReady tc) (Just $ errmsg))
                                          theconn >>
@@ -454,7 +460,7 @@ endpointLoop transport endpoint =
                       do withMVar (cciEndpointState endpoint) $ \st ->
                            case st of
                              CCIEndpointValid {cciConnectionsById = connectionsById} ->
-                               do case Map.lookup (fromEnum connectionId) connectionsById of
+                               do case Map.lookup (toConnectionId connectionId) connectionsById of
                                     Nothing -> dbg $ "Unknown connection ID: "++show connectionId
                                     Just cciconn ->
                                       modifyMVar (cciConnectionState cciconn) $ \connstate ->
@@ -479,7 +485,7 @@ endpointLoop transport endpoint =
                       -- The connection is not fully ready until it gets an EvAccept. Therefore,
                       -- there is a possible race condition if the other (originating) side receives
                       -- its EvConnect and tries to send a message before this (target) side is ready.
-                      let newmap = Map.insert conn (fromEnum connectionId) connectionsByConnection
+                      let newmap = Map.insert conn (toConnectionId connectionId) connectionsByConnection
                        in return $ Just epls {eplsConnectionsByConnection = newmap}
                   CCI.EvKeepAliveTimedOut _conn ->
                      do dbg $ show ev -- TODO another endpoint has died: tell CH; to do this we need to learn the endpointaddress for the given conn
