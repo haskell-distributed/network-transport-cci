@@ -16,7 +16,7 @@ Source-Repository head
 
 Library
   Build-Depends:   base >= 4.3 && < 5,
-                   binary >= 0.5,
+                   binary >= 0.6,
                    cci >= 0.2.0,
                    containers >= 0.4 && < 0.6,
                    data-accessor >= 0.2 && < 0.3,
@@ -38,8 +38,8 @@ Test-Suite TestCH
   Type:              exitcode-stdio-1.0
   Main-Is:           TestCH.hs
   Build-Depends:     base >= 4.4 && < 5,
-                     binary >= 0.5 && < 0.6,
-                     network-transport >= 0.2 && < 0.3,
+                     binary >= 0.6,
+                     network-transport >= 0.3 && < 0.4,
                      stm >= 2.3 && < 2.5,
                      transformers >= 0.2 && < 0.4,
                      mtl >= 2.0 && < 2.2,
@@ -48,9 +48,9 @@ Test-Suite TestCH
                      containers >= 0.4 && < 0.6,
                      old-locale >= 1.0 && < 1.1,
                      time >= 1.2 && < 1.5,
-                     template-haskell >= 2.6 && < 2.8,
+                     template-haskell >= 2.6 && < 2.9,
                      random >= 1.0 && < 1.1,
-                     ghc-prim >= 0.2 && < 0.3,
+                     ghc-prim >= 0.2 && < 0.4,
                      ansi-terminal >= 0.5 && < 0.6, distributed-process,cci
   Extensions:        RankNTypes,
                      ScopedTypeVariables,
@@ -69,11 +69,11 @@ Test-Suite TestCCI
   Type:            exitcode-stdio-1.0
   Main-Is:         TestCCI.hs
   Build-Depends:   base >= 4.3 && < 5,
-                   network-transport >= 0.2 && < 0.3,
+                   network-transport >= 0.3 && < 0.4,
                    data-accessor >= 0.2 && < 0.3,
                    containers >= 0.4 && < 0.6,
                    bytestring >= 0.9 && < 0.11,
-                   cci, binary >= 0.5 && < 0.6,
+                   cci, binary >= 0.6,
                    random >= 1.0 && < 1.1,distributed-process,
                    ansi-terminal >= 0.5 && < 0.6,
                    mtl >= 2.0 && < 2.2
