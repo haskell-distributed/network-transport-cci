@@ -1,15 +1,15 @@
 module Main where 
 
--- #if ! MIN_VERSION_base(4,6,0)
+#if ! MIN_VERSION_base(4,6,0)
 import Prelude hiding (catch)
--- #endif
+#endif
 
 import Data.Binary (Binary(..))
 import Data.Typeable (Typeable)
 import Data.Foldable (forM_)
-import Control.Concurrent (threadDelay,ThreadId,myThreadId)
+import Control.Concurrent (threadDelay)
 import Data.Time
-import Control.Concurrent.MVar 
+import Control.Concurrent.MVar
   ( MVar
   , newMVar
   , modifyMVar_
@@ -18,8 +18,8 @@ import Control.Concurrent.MVar
   , takeMVar
   , readMVar
   )
-import Control.Monad (replicateM_, replicateM, mapM, mapM_)
-import Control.Exception (throwIO,SomeException, throwTo, finally)
+import Control.Monad (replicateM_, replicateM)
+import Control.Exception (throwIO, finally)
 import Control.Applicative ((<$>), (<*>))
 import qualified Network.Transport as NT (Transport, closeEndPoint)
 import Network.Transport.CCI (createTransport, defaultCCIParameters)
