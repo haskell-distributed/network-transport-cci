@@ -4,6 +4,7 @@
 --
 -- Support for managing pools of CCI transfer buffers.
 
+{-# LANGUAGE ForeignFunctionInterface #-}
 module Network.Transport.CCI.Pool
   ( Pool
   , Buffer
@@ -19,6 +20,7 @@ module Network.Transport.CCI.Pool
 import Network.Transport.CCI.ByteString (unsafePackMallocCStringLen)
 
 import Control.Applicative ((<$>))
+import Control.Monad ( when )
 import Control.Exception (catch, IOException)
 
 import Data.Map (Map)
@@ -31,12 +33,16 @@ import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 import qualified Data.List as List (find, delete, deleteBy, insertBy)
 import Data.Maybe (fromJust)
 import Data.Ord (comparing)
-import Foreign.C.Types (CChar)
+import Foreign.C.Types ( CChar, CSize(..), CInt(..) )
 import Foreign.C.String (CStringLen)
-import Foreign.Marshal.Alloc (mallocBytes, free)
+import Foreign.Marshal.Alloc (mallocBytes, free, alloca)
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (Ptr,alignPtr)
+import Foreign.Ptr (Ptr)
+import Foreign.Storable ( peek )
 import Prelude
+
+
+foreign import ccall unsafe posix_memalign :: Ptr (Ptr a) -> CSize -> CSize -> IO CInt
 
 type BufferId = Int
 
@@ -48,7 +54,6 @@ type BufferId = Int
 data Buffer handle = Buffer
      {
         bId :: BufferId,
-        bAllocStart :: Ptr CChar,
         bStart :: Ptr CChar,
         bSize :: Int,
         bHandle :: handle
@@ -143,7 +148,7 @@ cleanup pool =
 destroyBuffer :: Pool handle -> Buffer handle -> IO ()
 destroyBuffer pool buffer =
  do (pUnregister pool) (bHandle buffer)
-    freeAligned ((bStart buffer,bSize buffer),bAllocStart buffer)
+    freeAligned (bStart buffer,bSize buffer)
 
 -- | Find an available buffer of the appropriate size, or allocate a new one if
 -- such a buffer is not already allocated. You will get back an updated pool and
@@ -157,7 +162,7 @@ newBuffer pool content =
          do mres <- allocAligned' (pAlign pool) (neededSize content)
             case mres of
               Nothing -> return Nothing
-              Just (cstr@(start,_),allocstart) -> do
+              Just cstr@(start,_) -> do
                 case content of
                   Right bs ->
                     copyTo bs start
@@ -166,7 +171,6 @@ newBuffer pool content =
                 let newbuf =
                        Buffer {
                          bId = pNextId pool,
-                         bAllocStart = allocstart,
                          bStart = start,
                          bSize = neededSize content,
                          bHandle = handle
@@ -192,19 +196,20 @@ newBuffer pool content =
           neededSize (Left n) = n
           neededSize (Right str) = BSC.length str
 
-freeAligned :: (CStringLen, Ptr CChar) -> IO ()
-freeAligned (_,actual) = free actual
+freeAligned :: CStringLen -> IO ()
+freeAligned = free . fst
 
-allocAligned' :: Int -> Int -> IO (Maybe (CStringLen, Ptr CChar))
+allocAligned' :: Int -> Int -> IO (Maybe CStringLen)
 allocAligned' a s =
    catch (Just <$> allocAligned a s) (\x -> const (return Nothing) (x::IOException))
 
-allocAligned :: Int -> Int -> IO (CStringLen, Ptr CChar)
-allocAligned 0 size = mallocBytes size >>= \p -> return ((p,size),p)
-allocAligned align size =
-     do ptr <- mallocBytes maxSize
-        return ((alignPtr ptr align, size), ptr)
-  where maxSize = size + align - 1
+allocAligned :: Int -> Int -> IO CStringLen
+allocAligned 0 size = mallocBytes size >>= \p -> return (p,size)
+allocAligned align size = alloca $ \ptr ->
+     do ret <- posix_memalign ptr (fromIntegral align) (fromIntegral size)
+        when (ret /= 0) $ error $ "allocAligned: " ++ show ret
+        res <- peek ptr
+        return (res, size)
 
 copyTo :: ByteString -> Ptr CChar -> IO ()
 copyTo bs pstr =
