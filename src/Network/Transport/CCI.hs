@@ -910,7 +910,8 @@ sendSimple :: CCI.Connection
            -> [ByteString]
            -> WordPtr
            -> IO ()
-sendSimple conn bs wp = retryCCI_ENOBUFS $ CCI.sendvSilent conn bs wp
+-- TODO find out why tests don't pass if CCI.sendvSilent is used instead
+sendSimple conn bs wp = retryCCI_ENOBUFS $ CCI.sendvBlocking conn bs wp
 
 retryCCI_ENOBUFS :: IO a -> IO a
 retryCCI_ENOBUFS action = catch action
