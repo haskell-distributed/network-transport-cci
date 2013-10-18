@@ -915,11 +915,12 @@ sendSimple conn bs wp = retryCCI_ENOBUFS $ CCI.sendvBlocking conn bs wp
 
 retryCCI_ENOBUFS :: IO a -> IO a
 retryCCI_ENOBUFS action = catch action
-     $ \e@(CCI.CCIException ret) -> case ret of
-       CCI.ENOBUFS -> do -- retry a bit later if there are not enough buffers
-         threadDelay 10000
-         retryCCI_ENOBUFS action
-       _       -> throwIO e
+     $ \e@(CCI.CCIException ret) ->
+         if ret == CCI.ENOBUFS || ret == CCI.EAGAIN then do
+           threadDelay 10000
+           retryCCI_ENOBUFS action
+          else
+           throwIO e
 
 -- | 'CCI.disconnect' is a local operation; it doesn't notify the other side, so
 -- we have to. We send a control message to the other side, which unregisters
