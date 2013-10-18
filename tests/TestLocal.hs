@@ -1,4 +1,4 @@
- {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module Main where
 
@@ -21,8 +21,8 @@ instance Binary Ping where
  get= do { getWord8; return Ping }
 
 server :: ReceivePort Ping -> Process ()
-server rPing = 
- replicateM_ count $ 
+server rPing =
+ replicateM_ count $
    do Ping <- receiveChan rPing
       liftIO $ putStrLn "Got a ping!"
 

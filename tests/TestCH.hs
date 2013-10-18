@@ -1,4 +1,4 @@
-module Main where 
+module Main where
 
 #if ! MIN_VERSION_base(4,6,0)
 import Prelude hiding (catch)
@@ -91,22 +91,22 @@ testBigPing transport concurrent pingSize = do
 
     tryRunProcess localNode $ do
       case concurrent of
-        False -> 
+        False ->
          flip mapM_ pingSize $ \size -> pinger pingServer size
-        True -> do procs <- flip mapM pingSize $ \size -> 
+        True -> do procs <- flip mapM pingSize $ \size ->
                                                   do rv <- liftIO $ newEmptyMVar
                                                      spawnLocal $ do pinger pingServer size
                                                                      liftIO $ putMVar rv ()
                                                      return rv
                    liftIO $ flip mapM_ procs takeMVar
-                   
+
 
     putMVar clientDone ()
 
   takeMVar clientDone
   takeMVar nodes >>= mapM_ closeLocalNode
-    where 
-          pinger pingServer pingSize = 
+    where
+          pinger pingServer pingSize =
               do pid <- getSelfPid
                  send pingServer (BigPong pid (replicate pingSize '!'))
                  BigPing _ _ <- expect
@@ -158,7 +158,7 @@ testPing transport = do
 monitorOrLink :: Bool            -- ^ 'True' for monitor, 'False' for link
               -> ProcessId       -- Process to monitor/link to
               -> Maybe (MVar ()) -- MVar to signal on once the monitor has been set up
-              -> Process (Maybe MonitorRef) 
+              -> Process (Maybe MonitorRef)
 monitorOrLink mOrL pid mSignal = do
   result <- if mOrL then Just <$> monitor pid
                     else link pid >> return Nothing
@@ -173,11 +173,11 @@ monitorTestProcess :: ProcessId       -- Process to monitor/link to
                    -> Bool            -- 'True' for monitor, 'False' for link
                    -> Bool            -- Should we unmonitor?
                    -> DiedReason      -- Expected cause of death
-                   -> Maybe (MVar ()) -- Signal for 'monitor set up' 
+                   -> Maybe (MVar ()) -- Signal for 'monitor set up'
                    -> MVar ()         -- Signal for successful termination
                    -> Process ()
-monitorTestProcess theirAddr mOrL un reason monitorSetup done = 
-  catch (do mRef <- monitorOrLink mOrL theirAddr monitorSetup 
+monitorTestProcess theirAddr mOrL un reason monitorSetup done =
+  catch (do mRef <- monitorOrLink mOrL theirAddr monitorSetup
             case (un, mRef) of
               (True, Nothing) -> do
                 unlink theirAddr
@@ -195,9 +195,9 @@ monitorTestProcess theirAddr mOrL un reason monitorSetup done =
             True <- return $ pid == theirAddr && not mOrL && not un && reason == reason'
             liftIO $ putMVar done ()
         )
-  
 
--- | Monitor a process on an unreachable node 
+
+-- | Monitor a process on an unreachable node
 testMonitorUnreachable :: NT.Transport -> Bool -> Bool -> IO ()
 testMonitorUnreachable transport mOrL un = do
   deadProcess <- newEmptyMVar
@@ -205,7 +205,7 @@ testMonitorUnreachable transport mOrL un = do
 
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
-    addr <- forkProcess localNode . liftIO $ threadDelay 1000000 
+    addr <- forkProcess localNode . liftIO $ threadDelay 1000000
     closeLocalNode localNode
     putMVar deadProcess addr
 
@@ -213,7 +213,7 @@ testMonitorUnreachable transport mOrL un = do
     localNode <- newLocalNode transport initRemoteTable
     theirAddr <- readMVar deadProcess
     runProcess localNode $
-      monitorTestProcess theirAddr mOrL un DiedDisconnect Nothing done 
+      monitorTestProcess theirAddr mOrL un DiedDisconnect Nothing done
 
   takeMVar done
 
@@ -233,7 +233,7 @@ testMonitorNormalTermination transport mOrL un = do
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     theirAddr <- readMVar monitoredProcess
-    tryRunProcess localNode $ 
+    tryRunProcess localNode $
       monitorTestProcess theirAddr mOrL un DiedNormal (Just monitorSetup) done
 
   takeMVar done
@@ -251,17 +251,17 @@ testMonitorAbnormalTermination transport mOrL un = do
     localNode <- newLocalNode transport initRemoteTable
     addr <- forkProcess localNode . liftIO $ do
       readMVar monitorSetup
-      throwIO err 
+      throwIO err
     putMVar monitoredProcess addr
 
   forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     theirAddr <- readMVar monitoredProcess
-    tryRunProcess localNode $ 
+    tryRunProcess localNode $
       monitorTestProcess theirAddr mOrL un (DiedException (show err)) (Just monitorSetup) done
 
   takeMVar done
-    
+
 -- | Monitor a local process that is already dead
 testMonitorLocalDeadProcess :: NT.Transport -> Bool -> Bool -> IO ()
 testMonitorLocalDeadProcess transport mOrL un = do
@@ -322,10 +322,10 @@ testMonitorDisconnect transport mOrL un = do
     theirAddr <- readMVar processAddr
     runProcess localNode $ do
       monitorTestProcess theirAddr mOrL un DiedDisconnect (Just monitorSetup) done
-  
+
   takeMVar done
 
-data Add       = Add    ProcessId Double Double deriving (Typeable) 
+data Add       = Add    ProcessId Double Double deriving (Typeable)
 data Divide    = Divide ProcessId Double Double deriving (Typeable)
 data DivByZero = DivByZero deriving (Typeable)
 
@@ -354,12 +354,12 @@ math = do
 -- | Test the math server (i.e., receiveWait)
 testMath :: NT.Transport -> IO ()
 testMath transport = do
-  serverAddr <- newEmptyMVar 
+  serverAddr <- newEmptyMVar
   clientDone <- newEmptyMVar
 
   -- Server
   forkTry $ do
-    localNode <- newLocalNode transport initRemoteTable 
+    localNode <- newLocalNode transport initRemoteTable
     addr <- forkProcess localNode math
     putMVar serverAddr addr
 
@@ -371,7 +371,7 @@ testMath transport = do
     tryRunProcess localNode $ do
       pid <- getSelfPid
       send mathServer (Add pid 1 2)
-      3 <- expect :: Process Double  
+      3 <- expect :: Process Double
       send mathServer (Divide pid 8 2)
       4 <- expect :: Process Double
       send mathServer (Divide pid 8 0)
@@ -381,7 +381,7 @@ testMath transport = do
   takeMVar clientDone
 
 -- | Send first message (i.e. connect) to an already terminated process
--- (without monitoring); then send another message to a second process on 
+-- (without monitoring); then send another message to a second process on
 -- the same remote node (we're checking that the remote node did not die)
 testSendToTerminated :: NT.Transport -> IO ()
 testSendToTerminated transport = do
@@ -389,7 +389,7 @@ testSendToTerminated transport = do
   serverAddr2 <- newEmptyMVar
   clientDone <- newEmptyMVar
 
-  forkTry $ do 
+  forkTry $ do
     terminated <- newEmptyMVar
     localNode <- newLocalNode transport initRemoteTable
     addr1 <- forkProcess localNode $ liftIO $ putMVar terminated ()
@@ -407,7 +407,7 @@ testSendToTerminated transport = do
       send server1 "Hi"
       send server2 (Pong pid)
       Ping pid' <- expect
-      True <- return $ pid' == server2 
+      True <- return $ pid' == server2
       liftIO $ putMVar clientDone ()
 
   takeMVar clientDone
@@ -427,14 +427,14 @@ testTimeout0 transport = do
   clientDone <- newEmptyMVar
   messagesSent <- newEmptyMVar
 
-  forkTry $ do 
+  forkTry $ do
     localNode <- newLocalNode transport initRemoteTable
     addr <- forkProcess localNode $ do
       liftIO $ readMVar messagesSent >> threadDelay 1000000
       -- Variation on the venerable ping server which uses a zero timeout
       -- Since we wait for all messages to be sent before doing this receive,
       -- we should nevertheless find the right message immediately
-      Just partner <- receiveTimeout 0 [match (\(Pong partner) -> return partner)] 
+      Just partner <- receiveTimeout 0 [match (\(Pong partner) -> return partner)]
       self <- getSelfPid
       send partner (Ping self)
     putMVar serverAddr addr
@@ -449,7 +449,7 @@ testTimeout0 transport = do
       replicateM_ 10000 $ send server "Irrelevant message"
       send server (Pong pid)
       liftIO $ putMVar messagesSent ()
-      Ping _ <- expect 
+      Ping _ <- expect
       liftIO $ putMVar clientDone ()
 
   takeMVar clientDone
@@ -464,7 +464,7 @@ testTypedChannels transport = do
     localNode <- newLocalNode transport initRemoteTable
     forkProcess localNode $ do
       (serverSendPort, rport) <- newChan
-      liftIO $ putMVar serverChannel serverSendPort 
+      liftIO $ putMVar serverChannel serverSendPort
       (clientSendPort, i) <- receiveChan rport
       sendChan clientSendPort (even i)
     return ()
@@ -474,11 +474,11 @@ testTypedChannels transport = do
     serverSendPort <- readMVar serverChannel
     tryRunProcess localNode $ do
       (clientSendPort, rport) <- newChan
-      sendChan serverSendPort (clientSendPort, 5) 
+      sendChan serverSendPort (clientSendPort, 5)
       False <- receiveChan rport
       liftIO $ putMVar clientDone ()
-      
-  takeMVar clientDone 
+
+  takeMVar clientDone
 
 -- | Test merging receive ports
 testMergeChannels :: NT.Transport -> IO ()
@@ -494,34 +494,34 @@ testMergeChannels transport = do
     testBlocked localNode False
   where
     -- Single layer of merging
-    testFlat :: LocalNode -> Bool -> String -> IO () 
-    testFlat localNode biased expected = 
+    testFlat :: LocalNode -> Bool -> String -> IO ()
+    testFlat localNode biased expected =
       tryRunProcess localNode $ do
-        rs  <- mapM charChannel "abc" 
-        m   <- mergePorts biased rs 
-        xs  <- replicateM 9 $ receiveChan m 
+        rs  <- mapM charChannel "abc"
+        m   <- mergePorts biased rs
+        xs  <- replicateM 9 $ receiveChan m
         True <- return $ xs == expected
         return ()
 
     -- Two layers of merging
     testNested :: LocalNode -> Bool -> Bool -> String -> IO ()
-    testNested localNode biasedInner biasedOuter expected = 
+    testNested localNode biasedInner biasedOuter expected =
       tryRunProcess localNode $ do
         rss  <- mapM (mapM charChannel) ["abc", "def", "ghi"]
         ms   <- mapM (mergePorts biasedInner) rss
         m    <- mergePorts biasedOuter ms
-        xs   <- replicateM (9 * 3) $ receiveChan m 
+        xs   <- replicateM (9 * 3) $ receiveChan m
         True <- return $ xs == expected
         return ()
 
     -- Test that if no messages are (immediately) available, the scheduler makes no difference
     testBlocked :: LocalNode -> Bool -> IO ()
     testBlocked localNode biased = do
-      vs <- replicateM 3 newEmptyMVar 
+      vs <- replicateM 3 newEmptyMVar
 
       forkProcess localNode $ do
-        [sa, sb, sc] <- liftIO $ mapM readMVar vs 
-        mapM_ ((>> liftIO (threadDelay 10000)) . uncurry sendChan) 
+        [sa, sb, sc] <- liftIO $ mapM readMVar vs
+        mapM_ ((>> liftIO (threadDelay 10000)) . uncurry sendChan)
           [ -- a, b, c
             (sa, 'a')
           , (sb, 'b')
@@ -550,20 +550,20 @@ testMergeChannels transport = do
 
       tryRunProcess localNode $ do
         (ss, rs) <- unzip <$> replicateM 3 newChan
-        liftIO $ mapM_ (uncurry putMVar) $ zip vs ss 
-        m  <- mergePorts biased rs 
+        liftIO $ mapM_ (uncurry putMVar) $ zip vs ss
+        m  <- mergePorts biased rs
         xs <- replicateM (6 * 3) $ receiveChan m
         True <- return $ xs == "abcacbbacbcacabcba"
         return ()
 
     mergePorts :: Serializable a => Bool -> [ReceivePort a] -> Process (ReceivePort a)
     mergePorts True  = mergePortsBiased
-    mergePorts False = mergePortsRR 
+    mergePorts False = mergePortsRR
 
     charChannel :: Char -> Process (ReceivePort Char)
     charChannel c = do
       (sport, rport) <- newChan
-      replicateM_ 3 $ sendChan sport c 
+      replicateM_ 3 $ sendChan sport c
       liftIO $ threadDelay 10000 -- Make sure messages have been sent
       return rport
 
@@ -578,7 +578,7 @@ testTerminate transport = do
   tryRunProcess localNode $ do
     ref <- monitor pid
     ProcessMonitorNotification ref' pid' (DiedException ex) <- expect
-    True <- return $ ref == ref' && pid == pid' && ex == show ProcessTerminationException 
+    True <- return $ ref == ref' && pid == pid' && ex == show ProcessTerminationException
     return ()
 
 testMonitorNode :: NT.Transport -> IO ()
@@ -602,7 +602,7 @@ testMonitorChannel transport = do
       sport <- expect :: Process (SendPort ())
       ref <- monitorPort sport
       PortMonitorNotification ref' port' DiedNormal <- expect
-      return $ ref' == ref && port' == sendPortId sport 
+      return $ ref' == ref && port' == sendPortId sport
       liftIO $ putMVar gotNotification ()
 
     tryRunProcess node2 $ do
@@ -616,24 +616,24 @@ testRegistry :: NT.Transport -> IO ()
 testRegistry transport = do
   node <- newLocalNode transport initRemoteTable
 
-  pingServer <- forkProcess node ping 
+  pingServer <- forkProcess node ping
 
   tryRunProcess node $ do
     register "ping" pingServer
     Just pid <- whereis "ping"
-    True <- return $ pingServer == pid 
+    True <- return $ pingServer == pid
     us <- getSelfPid
     nsend "ping" (Pong us)
-    Ping pid' <- expect 
+    Ping pid' <- expect
     True <- return $ pingServer == pid'
     return ()
-    
+
 testRemoteRegistry :: NT.Transport -> IO ()
 testRemoteRegistry transport = do
   node1 <- newLocalNode transport initRemoteTable
   node2 <- newLocalNode transport initRemoteTable
 
-  pingServer <- forkProcess node1 ping 
+  pingServer <- forkProcess node1 ping
 
   tryRunProcess node2 $ do
     let nid1 = localNodeId node1
@@ -641,10 +641,10 @@ testRemoteRegistry transport = do
     RegisterReply "ping" True <- expect
     whereisRemoteAsync nid1 "ping"
     WhereIsReply "ping" (Just pid) <- expect
-    True <- return $ pingServer == pid 
+    True <- return $ pingServer == pid
     us <- getSelfPid
     nsendRemote nid1 "ping" (Pong us)
-    Ping pid' <- expect 
+    Ping pid' <- expect
     True <- return $ pingServer == pid'
     return ()
 
@@ -669,18 +669,18 @@ testSpawnLocal transport = do
 main :: IO ()
 main = do
   Right transport <- createTransport defaultCCIParameters
--- previously: createTransport "127.0.0.1" "8080" defaultTCPParameters 
-  runTests 
+-- previously: createTransport "127.0.0.1" "8080" defaultTCPParameters
+  runTests
     [ ("Ping",             testPing             transport)
     , ("BigPing",          testBigPing          transport False (replicate 1000 10000))
     , ("BigPingAsc",       testBigPing          transport False (take 400 $ cycle [4000, 6000.. 50000]))
     , ("BigPingDec",       testBigPing          transport False (take 400 $ cycle $ reverse [4000, 6000.. 50000]))
     , ("VeryBigPing",      testBigPing          transport False (replicate 10   1000000))
     , ("ConcurrentBigPing",testBigPing          transport True  (replicate 100  10000))
-    , ("Math",             testMath             transport) 
+    , ("Math",             testMath             transport)
     , ("Timeout",          testTimeout          transport)
     , ("Timeout0",         testTimeout0         transport)
-    , ("SendToTerminated", testSendToTerminated transport) 
+    , ("SendToTerminated", testSendToTerminated transport)
     , ("TypedChannnels",   testTypedChannels    transport)
     , ("MergeChannels",    testMergeChannels    transport)
     , ("Terminate",        testTerminate        transport)
@@ -690,7 +690,7 @@ main = do
       -- Monitoring processes
       --
       -- The "missing" combinations in the list below don't make much sense, as
-      -- we cannot guarantee that the monitor reply or link exception will not 
+      -- we cannot guarantee that the monitor reply or link exception will not
       -- happen before the unmonitor or unlink
     , ("MonitorUnreachable",           testMonitorUnreachable         transport True  False)
     , ("MonitorNormalTermination",     testMonitorNormalTermination   transport True  False)

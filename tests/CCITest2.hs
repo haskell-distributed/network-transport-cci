@@ -23,7 +23,7 @@ msgLoop ep = catch (loop Map.empty 0) handler
              Nothing -> do
                (newconns,newnextid) <- tryWithEventData (meEndpoint ep) (return (conns,nextid))$ \ev ->
                  case ev of
-                   EvSend _ctx _status _cnn -> 
+                   EvSend _ctx _status _cnn ->
                       return (conns,nextid)
                    EvRecv eb _conn ->
                      do msg <- packEventBytes eb
@@ -36,7 +36,7 @@ msgLoop ep = catch (loop Map.empty 0) handler
                      do trace "Connected" $ putMVar (meConnection ep) (Just conn)
                         return (conns,nextid)
                    EvAccept cid (Right conn) ->
-                       let newmap = Map.insert conn cid conns 
+                       let newmap = Map.insert conn cid conns
                         in return (newmap,nextid)
                    EvConnectRequest sev eb attr ->
                      do accept sev (toEnum nextid)
@@ -48,9 +48,9 @@ msgLoop ep = catch (loop Map.empty 0) handler
                    _ -> do
                            putStrLn $ "Horrible error: " ++ show ev
                            return (conns,nextid)
-               loop newconns newnextid 
+               loop newconns newnextid
 
-data MyEndpoint = MyEndpoint 
+data MyEndpoint = MyEndpoint
     { meEndpoint :: Endpoint
     , meConnection :: MVar (Maybe Connection)
     , meDone :: MVar ()
@@ -69,7 +69,7 @@ makeEndpoint =
 
 connectTo :: MyEndpoint -> String -> IO Connection
 connectTo ep1 ep2 =
-  do 
+  do
      connect (meEndpoint ep1) ep2 BS.empty CONN_ATTR_RO (0::WordPtr) Nothing
      takeMVar (meConnection ep1) >>= maybe (error "Connection rejected") return
 
@@ -95,4 +95,3 @@ main = withCCI go
                                 destroyEndpoint (meEndpoint ep)
          handler :: SomeException -> IO ()
          handler e = putStrLn ("main exception: "++show e) >> throw e
-

@@ -1,4 +1,4 @@
- {-# LANGUAGE DeriveDataTypeable #-}
+{-# LANGUAGE DeriveDataTypeable #-}
 
 module Main where
 
@@ -15,8 +15,8 @@ import Prelude hiding (catch)
 import Control.Exception (catch, SomeException)
 
 client1 :: Process ()
-client1  = 
-  do liftIO $ threadDelay 5000000 
+client1  =
+  do liftIO $ threadDelay 5000000
      liftIO $ putStrLn "Client 1 ending"
 
 client2 :: ProcessId -> Process ()
@@ -38,7 +38,7 @@ main = do
  Right transport <- createTransport defaultCCIParameters
  node1 <- newLocalNode transport initRemoteTable
  node2 <- newLocalNode transport initRemoteTable
- mv <- newEmptyMVar 
+ mv <- newEmptyMVar
  runProcess node1 $ do pid <- spawnLocal client1
                        say "Client 1 launched"
                        liftIO $ putMVar mv pid

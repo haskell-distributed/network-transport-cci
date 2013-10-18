@@ -1,4 +1,4 @@
-module Main where 
+module Main where
 
 -- #if ! MIN_VERSION_base(4,6,0)
 import Prelude hiding (catch)
@@ -8,7 +8,7 @@ import Data.Binary (Binary(..))
 import Data.Typeable (Typeable)
 import Data.Foldable (forM_)
 import Control.Concurrent (threadDelay,ThreadId,myThreadId)
-import Control.Concurrent.MVar 
+import Control.Concurrent.MVar
   ( MVar
   , newEmptyMVar
   , putMVar
@@ -55,7 +55,7 @@ instance Binary BigPong where
 
 
 showProcessId :: ProcessId -> String
-showProcessId (ProcessId (NodeId addr) (LocalProcessId unique lid)) 
+showProcessId (ProcessId (NodeId addr) (LocalProcessId unique lid))
     = "pid://" ++ show addr ++ ":" ++ show lid ++ "!" ++ show unique
 
 readProcessId :: String -> ProcessId
@@ -91,8 +91,8 @@ client :: NT.Transport -> ProcessId -> IO ()
 client transport pingServer =
   do node <- newLocalNode transport initRemoteTable
      tryRunProcess node $ replicateM_ numPings pinger
-    where 
-          pinger = 
+    where
+          pinger =
               do pid <- getSelfPid
                  send pingServer (BigPong pid (replicate pingSize '!'))
                  BigPing _ _ <- expect
