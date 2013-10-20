@@ -68,7 +68,7 @@ import Control.Exception
 import Data.Char (chr, ord)
 import Data.Foldable (mapM_)
 import Data.List (genericTake)
-import Data.Maybe (catMaybes)
+import Data.Maybe (catMaybes, fromMaybe)
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
 import Foreign.Ptr (WordPtr)
@@ -260,20 +260,17 @@ waitReady conn = takeMVar (cciReady conn) >>= mapM_ throwIO
 createTransport :: CCIParameters
                 -> IO (Either (TransportError CCIErrorCode) Transport)
 createTransport params =
-  try $ mapCCIException (translateException CCICreateTransportFailed) $
-        do CCI.initCCI
-           state <- newMVar $ CCITransportStateValid
-           return (mkTransport (mkInternalTransport state))
-    where
-         mkInternalTransport st = CCITransport {
-             cciParameters = params,
-             cciTransportState = st
-         }
-         mkTransport inter =
-             Transport {
-                newEndPoint = apiNewEndPoint inter,
-                closeTransport = apiCloseTransport inter
-             }
+    try $ mapCCIException (translateException CCICreateTransportFailed) $ do
+      CCI.initCCI
+      state <- newMVar CCITransportStateValid
+      return $ mkTransport $ mkInternalTransport state
+  where
+    mkInternalTransport st = CCITransport
+      { cciParameters = params
+      , cciTransportState = st }
+    mkTransport inter = Transport
+      { newEndPoint = apiNewEndPoint inter
+      , closeTransport = apiCloseTransport inter }
 
 -- TODO this should shut down all known endpoints we'll need to keep a list of
 -- known endpoints, naturally.
@@ -289,44 +286,44 @@ apiCloseTransport transport =
 apiNewEndPoint :: CCITransport
                -> IO (Either (TransportError NewEndPointErrorCode) EndPoint)
 apiNewEndPoint transport =
-  try $ mapCCIException (translateException NewEndPointFailed) $
-    do (endpoint, fd) <- makeEndpoint  (cciDevice (cciParameters transport))
-       CCI.setEndpt_KeepAliveTimeout endpoint 5000000 -- TODO currently broken in CCI layer
-       uri <- CCI.getEndpt_URI endpoint
-       align <- CCI.getEndpt_RMAAlign endpoint
-       chan <- newChan
-       thrdsem <- newEmptyMVar
-       thrd <- forkIO (endpointHandler thrdsem)
-       finalized <- newEmptyMVar
-       withMVar (cciTransportState transport) $ \st ->
-          case st of
-            CCITransportStateValid ->
-               do endpstate <- newMVar $
-                        CCIEndpointValid {
-                            cciRMAState = Map.empty,
-                            cciRMANextTransferId = 1,
-                            cciNextConnectionId = 0,
-                            cciEndpointThread = thrd,
-                            cciConnectionsById = Map.empty }
-                  let myEndpoint = CCIEndpoint {
-                        cciFileDescriptor = fd,
-                        cciEndpoint = endpoint,
-                        cciChannel = chan,
-                        cciUri = uri,
-                        cciRMAAlignments = align,
-                        cciTransportEndpoint = transportEndPoint,
-                        cciEndpointState = endpstate,
-                        cciEndpointFinalized = finalized}
-                      transportEndPoint = EndPoint {
-                        receive = readChan chan,
-                        address = EndPointAddress $ BSC.pack uri,
-                        connect = apiConnect transport myEndpoint,
-                        closeEndPoint = apiCloseEndPoint transport myEndpoint,
-                        newMulticastGroup = return . Left $ newMulticastGroupError,
-                        resolveMulticastGroup = return . Left . const resolveMulticastGroupError }
-                  putMVar thrdsem (transport,myEndpoint)
-                  return transportEndPoint
-            _ -> throwIO (TransportError NewEndPointFailed "Transport closed")
+    try $ mapCCIException (translateException NewEndPointFailed) $ do
+      (endpoint, fd) <- makeEndpoint $ cciDevice (cciParameters transport)
+      -- TODO currently broken in CCI layer
+      CCI.setEndpt_KeepAliveTimeout endpoint 5000000
+      uri <- CCI.getEndpt_URI endpoint
+      align <- CCI.getEndpt_RMAAlign endpoint
+      chan <- newChan
+      thrdsem <- newEmptyMVar
+      thrd <- forkIO (endpointHandler thrdsem)
+      finalized <- newEmptyMVar
+      withMVar (cciTransportState transport) $ \st -> case st of
+        CCITransportStateValid -> do
+          endpstate <- newMVar CCIEndpointValid
+                         { cciRMAState = Map.empty
+                         , cciRMANextTransferId = 1
+                         , cciNextConnectionId = 0
+                         , cciEndpointThread = thrd
+                         , cciConnectionsById = Map.empty }
+          let myEndpoint = CCIEndpoint
+                { cciFileDescriptor = fd
+                , cciEndpoint = endpoint
+                , cciChannel = chan
+                , cciUri = uri
+                , cciRMAAlignments = align
+                , cciTransportEndpoint = transportEndPoint
+                , cciEndpointState = endpstate
+                , cciEndpointFinalized = finalized }
+              transportEndPoint = EndPoint
+                { receive = readChan chan
+                , address = EndPointAddress $ BSC.pack uri
+                , connect = apiConnect transport myEndpoint
+                , closeEndPoint = apiCloseEndPoint transport myEndpoint
+                , newMulticastGroup = return . Left $ newMulticastGroupError
+                , resolveMulticastGroup =
+                    return . Left . const resolveMulticastGroupError }
+          putMVar thrdsem (transport,myEndpoint)
+          return transportEndPoint
+        _ -> throwIO (TransportError NewEndPointFailed "Transport closed")
   where
     makeEndpoint dv =
        case cciReceiveStrategy (cciParameters transport) of
@@ -355,18 +352,19 @@ toConnectionId = fromIntegral . fromEnum
 endpointHandler :: MVar (CCITransport, CCIEndpoint) -> IO ()
 endpointHandler mv =
    do (transport, endpoint) <- takeMVar mv
-      catch (go transport endpoint) exceptionHandler
+      catch (endpointLoop transport endpoint) exceptionHandler
   where exceptionHandler :: SomeException -> IO ()
-        exceptionHandler e = dbg $ "Exception in endpointHandler: "++show e -- TODO shutdown endpoint here
-        go transport endpoint = endpointLoop transport endpoint
+        exceptionHandler e =
+           -- TODO shutdown endpoint here
+          dbg $ "Exception in endpointHandler: "++ show e
 
 data EndpointLoopState = EndpointLoopState
-    {
-       eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId,
-       eplsNextConnectionId :: !ConnectionId,
-       eplsNextTransferId :: !RMATransferId,
-       eplsTransfers :: Map.Map RMATransferId (Pool.Buffer CCI.RMALocalHandle), -- TODO IntMap
-       eplsPool :: Pool.Pool CCI.RMALocalHandle
+    { eplsConnectionsByConnection :: Map.Map CCI.Connection ConnectionId
+    , eplsNextConnectionId :: !ConnectionId
+    , eplsNextTransferId :: !RMATransferId
+      -- TODO IntMap
+    , eplsTransfers :: Map.Map RMATransferId (Pool.Buffer CCI.RMALocalHandle)
+    , eplsPool :: Pool.Pool CCI.RMALocalHandle
     }
 
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
@@ -389,7 +387,7 @@ endpointLoop transport endpoint = loop newEpls
                       (\cstr -> CCI.rmaRegister (cciEndpoint endpoint)
                                                 cstr
                                                 CCI.RMA_WRITE)
-                      (\lhandle -> CCI.rmaDeregister (cciEndpoint endpoint) lhandle) }
+                      (CCI.rmaDeregister (cciEndpoint endpoint)) }
     loop :: EndpointLoopState -> IO ()
     loop epls@EndpointLoopState { eplsNextConnectionId = nextConnectionId
                                 , eplsConnectionsByConnection = connectionsByConnection
@@ -430,10 +428,10 @@ endpointLoop transport endpoint = loop newEpls
                        _ -> dbg "Endpoint already dead"
           return $ Just epls
         CCI.EvRecv eb conn -> do
-          let connid = case Map.lookup conn connectionsByConnection of
-                Nothing ->
-                  throw $ userError $ "Unknown connection in EvRecv: " ++ show conn
-                Just val -> val
+          let connid =
+                fromMaybe
+                  (throw $ userError $ "Unknown connection in EvRecv: " ++ show conn)
+                  (Map.lookup conn connectionsByConnection)
           msg <- CCI.packEventBytes eb
           case ord $ BSC.head msg of
             0 -> do
@@ -538,7 +536,7 @@ endpointLoop transport endpoint = loop newEpls
               maybe (dbg $ "Connection " ++
                            show connectionId ++
                            " failed because " ++ statusMsg)
-                     (\tc -> putMVar (cciReady tc) (Just $ errmsg))
+                     (\tc -> putMVar (cciReady tc) (Just errmsg))
                     theconn
               return st { cciConnectionsById = newmap }
             _ -> return st
@@ -800,10 +798,7 @@ sendCore transport endpoint conn context isCtrlMsg bs =
   where
     messageLength = sum (map BSC.length bs)
     augmentedbs = msgprefix:bs
-    msgprefix =
-        if isCtrlMsg
-        then BSC.singleton (chr 1)
-        else BSC.singleton (chr 0)
+    msgprefix = BSC.singleton $ chr $ if isCtrlMsg then 1 else 0
 
 -- | For RMA transmissions, we do this:
 --
