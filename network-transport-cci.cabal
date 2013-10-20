@@ -6,8 +6,7 @@ License:       BSD3
 License-File:  LICENSE
 Copyright:     Parallel Scientific Labs, LLC.
 Maintainer:    Facundo Domìnguez <facundo.dominguez@parsci.com>
-Synopsis:      CCI instantation of Network.Transport
-Description:   CCI instantation of Network.Transport
+Synopsis:      CCI instantation of Network.Transport.
 Category:      Network
 
 Source-Repository head
