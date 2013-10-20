@@ -827,118 +827,128 @@ sendRMA :: CCITransport
         -> [ByteString]
         -> WordPtr
         -> IO ()
-sendRMA transport endpoint _conn realconn bs _ctx =
-  do (rmatid,rmastate) <- newRMA
-     let -- Tell the remote side, if we can, to free the buffer corresponding to
-         -- the given ID. If ok, then the buffer should be complete, create
-         -- a message from it. Otherwise, throw it away.
-         freeRemoteBuffer remoteid ok = swallowException $ sendControlMessageInside transport endpoint realconn (finalizeMessage ok remoteid)
+sendRMA transport endpoint _conn realconn bs _ctx = do
+    (rmatid,rmastate) <- newRMA
+    let -- Tell the remote side, if we can, to free the buffer corresponding to
+        -- the given ID. If ok, then the buffer should be complete, create
+        -- a message from it. Otherwise, throw it away.
+        freeRemoteBuffer remoteid ok =
+          swallowException $
+          sendControlMessageInside transport endpoint realconn $
+          finalizeMessage ok remoteid
 
-         -- When we're sending the last chunk to the other side, we ask CCI to
-         -- deliver this finalization message, which is interpreted as a control
-         -- message, signalling the receiver to extract the data, send it to CH,
-         -- and shut down the corresponding buffer. The leading '\1' identifies
-         -- it as a control message.
-         finalizeMessage ok remoteid =
-                ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
-         encodedFinalization ok remoteid =
-                BSC.concat (BSC.singleton '\1' : (BSL.toChunks $ encode $ finalizeMessage ok remoteid))
+        -- When we're sending the last chunk to the other side, we ask CCI to
+        -- deliver this finalization message, which is interpreted as a control
+        -- message, signalling the receiver to extract the data, send it to CH,
+        -- and shut down the corresponding buffer. The leading '\1' identifies it
+        -- as a control message.
+        finalizeMessage ok remoteid =
+          ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
+        encodedFinalization ok remoteid =
+          BSC.concat (BSC.singleton '\1' : (BSL.toChunks $ encode $ finalizeMessage ok remoteid))
 
-         eraseRmaState =
-           modifyMVar_ (cciEndpointState endpoint)
-              (\st -> return st {cciRMAState = Map.delete rmatid (cciRMAState st)})
+        eraseRmaState =
+          modifyMVar_ (cciEndpointState endpoint) $ \st ->
+            return st { cciRMAState = Map.delete rmatid (cciRMAState st) }
 
-         -- Coordinate RMA handles with the other side. We tell receiver how big
-         -- the complete message is. It allocates a buffer and sends us back
-         -- a handle. We wait for it, throwing if we exceed the timeout.
-         getRemoteHandle =
-            let maybeTimeout = fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
-                err = TransportError SendFailed "RMA partner failed to respond"
-                sendInitMsg = sendControlMessageInside transport endpoint realconn initMsg
-                initMsg = ControlMessageInitRMA {rmaSize = msgLength, rmaId = rmatid, rmaEndpointAddress = cciUri endpoint}
-             in timeoutMaybe maybeTimeout err $
-                                do sendInitMsg
-                                   res <- takeMVar (cciRMARemoteHandle rmastate)
-                                   case res of
-                                      Just n -> return n
-                                      Nothing -> throwIO $ TransportError SendFailed "Couldn't allocate remote buffer"
-         doRMA = bracketOnError
-                    getRemoteHandle
-                    (\(_, remoteid) -> freeRemoteBuffer remoteid False)
-                    (\(remoteh, remoteid) ->
-                       withRMABuffer endpoint allbs CCI.RMA_READ $ \localh ->
-                          let chunksAndFlags = reverse (zip3 (reverse chunks)
-                                                       ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT])
-                                                       ((Just $ encodedFinalization True remoteid) : repeat Nothing))
+        -- Coordinate RMA handles with the other side. We tell receiver how big
+        -- the complete message is. It allocates a buffer and sends us back
+        -- a handle. We wait for it, throwing if we exceed the timeout.
+        getRemoteHandle =
+          let maybeTimeout =
+                fmap fromIntegral $ cciConnectionTimeout $ cciParameters transport
+              err = TransportError SendFailed "RMA partner failed to respond"
+              sendInitMsg = sendControlMessageInside transport endpoint realconn initMsg
+              initMsg = ControlMessageInitRMA
+                { rmaSize = msgLength
+                , rmaId = rmatid
+                , rmaEndpointAddress = cciUri endpoint }
+           in timeoutMaybe maybeTimeout err $ do
+                sendInitMsg
+                res <- takeMVar (cciRMARemoteHandle rmastate)
+                case res of
+                  Just n -> return n
+                  Nothing -> throwIO $ TransportError SendFailed "Couldn't allocate remote buffer"
+        doRMA = bracketOnError
+                  getRemoteHandle
+                  (\(_, remoteid) -> freeRemoteBuffer remoteid False)
+                  (\(remoteh, remoteid) ->
+                     withRMABuffer endpoint allbs CCI.RMA_READ $ \localh -> do
+                        let chunksAndFlags = reverse (zip3 (reverse chunks)
+                                                     ([CCI.RMA_FENCE] : repeat [CCI.RMA_SILENT])
+                                                     ((Just $ encodedFinalization True remoteid) : repeat Nothing))
 
-                           -- Break the original message to chunks of the allowed send size.
-                           -- The chunks are sent with separate rmaWrite calls. The flags
-                           -- are important: the last chunk is marked RMA_FENCE, and all
-                           -- other messages are marked RMA_SILENT. This means (a)
-                           -- we only get confirmation message for the last chunk and (b)
-                           -- the confirmation message for the last chunk carries a guarantee
-                           -- that all preceeding chunks have been sent.
-                           in do forM_ chunksAndFlags $ \((buffOffset,buffLength),opts,finalizer) ->
-                                     CCI.rmaWrite realconn finalizer
-                                                remoteh (fromIntegral buffOffset) localh
-                                                (fromIntegral buffOffset) (fromIntegral buffLength)
-                                                (toEnum rmatid::WordPtr) opts
+                        -- Break the original message to chunks of the allowed
+                        -- send size. The chunks are sent with separate rmaWrite
+                        -- calls. The flags are important: the last chunk is
+                        -- marked RMA_FENCE, and all other messages are marked
+                        -- RMA_SILENT. This means (a) we only get confirmation
+                        -- message for the last chunk and (b) the confirmation
+                        -- message for the last chunk carries a guarantee that all
+                        -- preceeding chunks have been sent.
+                        forM_ chunksAndFlags $ \((buffOffset,buffLength),opts,finalizer) ->
+                          CCI.rmaWrite realconn
+                                       finalizer
+                                       remoteh
+                                       (fromIntegral buffOffset)
+                                       localh
+                                       (fromIntegral buffOffset)
+                                       (fromIntegral buffLength)
+                                       (toEnum rmatid::WordPtr)
+                                       opts
 
-                                 -- We need to wait until we get a send confirmation from
-                                 -- CCI about the lsat chunk before it's okay to release
-                                 -- the buffer. If we get an error from sending, throw.
-                                 takeMVar (cciRMAComplete rmastate) >>= throwStatus)
-     doRMA `finally` eraseRmaState -- probably shold mask exceptions here
-        where  newRMA =
-                 modifyMVar (cciEndpointState endpoint) $ \st ->
-                   case st of
-                     CCIEndpointValid
-                        {cciRMANextTransferId=nextTransferId,
-                         cciRMAState=rmaState} ->
-                           let tid = case nextTransferId of
-                                       0 -> nextTransferId + 1 -- Skip over ID zero, since context 0 is used for regular messages
-                                       _ -> nextTransferId
-                            in do rmaRemoteHandle <- newEmptyMVar
-                                  rmaComplete <- newEmptyMVar
-                                  let myRmaState = CCIRMAState
-                                       {
-                                          cciRMARemoteHandle = rmaRemoteHandle,
-                                          cciRMAComplete = rmaComplete,
-                                          cciOutstandingChunks = length chunks
-                                       }
-                                  return (st {cciRMANextTransferId=tid+1,
-                                              cciRMAState=Map.insert tid myRmaState rmaState},(tid,myRmaState))
-                     _ -> throwIO (TransportError SendFailed "Endpoint invalid")
-               throwStatus status =
-                 case status of
-                    CCI.SUCCESS -> return ()
-                    _ -> throwIO $ TransportError SendFailed ("EvSend reported error " ++ show status)
+                        -- We need to wait until we get a send confirmation from
+                        -- CCI about the lsat chunk before it's okay to release
+                        -- the buffer. If we get an error from sending, throw.
+                        takeMVar (cciRMAComplete rmastate) >>= throwStatus)
+    doRMA `finally` eraseRmaState -- probably shold mask exceptions here
+  where
+    newRMA = modifyMVar (cciEndpointState endpoint) $ \st -> case st of
+      CCIEndpointValid
+         {cciRMANextTransferId=nextTransferId,
+          cciRMAState=rmaState} ->
+            let tid = case nextTransferId of
+                        0 -> nextTransferId + 1 -- Skip over ID zero, since context 0 is used for regular messages
+                        _ -> nextTransferId
+             in do rmaRemoteHandle <- newEmptyMVar
+                   rmaComplete <- newEmptyMVar
+                   let myRmaState = CCIRMAState
+                        {
+                           cciRMARemoteHandle = rmaRemoteHandle,
+                           cciRMAComplete = rmaComplete,
+                           cciOutstandingChunks = length chunks
+                        }
+                   return (st {cciRMANextTransferId=tid+1,
+                               cciRMAState=Map.insert tid myRmaState rmaState},(tid,myRmaState))
+      _ -> throwIO (TransportError SendFailed "Endpoint invalid")
+    throwStatus CCI.SUCCESS = return ()
+    throwStatus status =
+        throwIO $ TransportError SendFailed ("EvSend reported error " ++ show status)
 
-               allbs = BSC.concat bs
-               msgLength = BSC.length allbs
+    allbs = BSC.concat bs
+    msgLength = BSC.length allbs
 
-               chunkSize :: Word32
-               chunkSize =
-                 let notZero 0 = Nothing
-                     notZero n = Just n
-                  in minimum $ catMaybes [Just $ cciMaxRMABuffer (cciParameters transport),
-                                          notZero $ fromIntegral $ CCI.rmaWriteLength (cciRMAAlignments endpoint),
-                                          notZero $ fromIntegral $ CCI.rmaReadLength (cciRMAAlignments endpoint)]
+    chunkSize :: Word32
+    chunkSize =
+      let notZero 0 = Nothing
+          notZero n = Just n
+      in minimum $ catMaybes [ Just $ cciMaxRMABuffer (cciParameters transport)
+                             , notZero $ fromIntegral $ CCI.rmaWriteLength (cciRMAAlignments endpoint)
+                             , notZero $ fromIntegral $ CCI.rmaReadLength (cciRMAAlignments endpoint) ]
 
-               -- A list of chunks to send, indicated as the offset into the
-               -- buffer and size. Chunksize should be limited by the maximum
-               -- RMA buffer size (set in CCIParameters) and maximum read/write
-               -- length (gotten from RMAAlignments). I'm not sure if we need to
-               -- obey both rmaWriteLength and rmaReadLength, but playing it
-               -- safe by taking the minimum seems wise.
-               chunks =
-                   let (fullchunks,partialchunk) = fromIntegral msgLength `divMod` chunkSize
-                       maybePartialChunk =
-                                   if partialchunk==0
-                                      then []
-                                      else [(fullchunks*chunkSize,partialchunk)]
-                    in genericTake fullchunks [ (offsets,chunkSize) | offsets<-[0,chunkSize..]]
-                           ++ maybePartialChunk
+    -- A list of chunks to send, indicated as the offset into the buffer and
+    -- size. Chunksize should be limited by the maximum RMA buffer size (set in
+    -- CCIParameters) and maximum read/write length (gotten from RMAAlignments).
+    -- I'm not sure if we need to obey both rmaWriteLength and rmaReadLength,
+    -- but playing it safe by taking the minimum seems wise.
+    chunks =
+        let (fullchunks,partialchunk) = fromIntegral msgLength `divMod` chunkSize
+            maybePartialChunk =
+              if partialchunk==0
+              then []
+              else [(fullchunks*chunkSize,partialchunk)]
+        in genericTake fullchunks [ (offsets,chunkSize) | offsets<-[0,chunkSize..]] ++
+           maybePartialChunk
 
 -- TODO: draw buffers from a pool of locally stored buffers, rather than
 -- registering them each time;
