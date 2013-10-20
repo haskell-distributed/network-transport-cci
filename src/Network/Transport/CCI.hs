@@ -32,23 +32,6 @@ import Network.Transport
     , Connection(..)
     , ConnectionId
     )
-import Control.Applicative ((<*>), (<$>), pure)
-import Control.Monad (liftM, forM_, void, when)
-import Control.Concurrent.Chan
-import Control.Concurrent (forkIO, ThreadId, threadDelay)
-import Control.Concurrent.MVar
-import Control.Exception
-    ( catch
-    , bracketOnError
-    , try
-    , SomeException
-    , throw
-    , throwIO
-    , Exception
-    , finally
-    )
-
-import System.Posix.Types (Fd)
 
 import qualified Data.Map as Map
 
@@ -67,13 +50,32 @@ import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL (toChunks, fromChunks)
 import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
 
+import Control.Applicative ((<*>), (<$>), pure)
+import Control.Monad (liftM, forM_, void, when)
+import Control.Concurrent.Chan
+import Control.Concurrent (forkIO, ThreadId, threadDelay)
+import Control.Concurrent.MVar
+import Control.Exception
+    ( catch
+    , bracketOnError
+    , try
+    , SomeException
+    , throw
+    , throwIO
+    , Exception
+    , finally
+    )
 import Data.Char (chr, ord)
+import Data.Foldable (mapM_)
 import Data.List (genericTake)
 import Data.Maybe (catMaybes)
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
 import Foreign.Ptr (WordPtr)
-import Prelude
+
+import System.Posix.Types (Fd)
+
+import Prelude hiding (mapM_)
 
 -- TODO: wait for ORNL to implement keepalive timeout, extend CCIParameters to
 -- support other endpoint options
@@ -252,12 +254,7 @@ getEndpointAddress :: CCIEndpoint -> EndPointAddress
 getEndpointAddress ep = EndPointAddress $ BSC.pack (cciUri ep)
 
 waitReady :: CCIConnection -> IO ()
-waitReady conn =
-  takeMVar (cciReady conn)
-       >>= \rdy ->
-         case rdy of
-            Nothing -> return ()
-            Just err -> throwIO err
+waitReady conn = takeMVar (cciReady conn) >>= mapM_ throwIO
 
 -- | Create a transport object suitable for using with CH.
 createTransport :: CCIParameters
@@ -374,20 +371,26 @@ data EndpointLoopState = EndpointLoopState
 
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
 endpointLoop transport endpoint =
- let mostRestrictiveAlignment align = maximum $ [CCI.rmaWriteLocalAddr,CCI.rmaWriteRemoteAddr,
-                                                CCI.rmaReadLocalAddr,CCI.rmaReadRemoteAddr] <*> pure align
-     newEpls = EndpointLoopState {eplsNextConnectionId = 0,
-                                  eplsConnectionsByConnection = Map.empty,
-                                  eplsNextTransferId = 0,
-                                  eplsTransfers = Map.empty,
-                                  eplsPool = Pool.newPool
-                                                (fromEnum $ mostRestrictiveAlignment (cciRMAAlignments endpoint))
-                                                (cciOutstandingRMABuffers $ cciParameters transport)
-                                                (\cstr -> CCI.rmaRegister (cciEndpoint endpoint) cstr CCI.RMA_WRITE)
-                                                (\lhandle -> CCI.rmaDeregister (cciEndpoint endpoint) lhandle) }
+ let mostRestrictiveAlignment align =
+       maximum $ [ CCI.rmaWriteLocalAddr
+                 , CCI.rmaWriteRemoteAddr
+                 , CCI.rmaReadLocalAddr
+                 , CCI.rmaReadRemoteAddr] <*> pure align
+     newEpls = EndpointLoopState
+                 { eplsNextConnectionId = 0
+                 , eplsConnectionsByConnection = Map.empty
+                 , eplsNextTransferId = 0
+                 , eplsTransfers = Map.empty
+                 , eplsPool =
+                     Pool.newPool
+                       (fromEnum $ mostRestrictiveAlignment $ cciRMAAlignments endpoint)
+                       (cciOutstandingRMABuffers $ cciParameters transport)
+                       (\cstr -> CCI.rmaRegister (cciEndpoint endpoint)
+                                                 cstr
+                                                 CCI.RMA_WRITE)
+                       (\lhandle -> CCI.rmaDeregister (cciEndpoint endpoint) lhandle) }
      loop :: EndpointLoopState -> IO ()
-     loop epls =
-       case epls of
+     loop epls = case epls of
          EndpointLoopState {eplsNextConnectionId = nextConnectionId,
                             eplsConnectionsByConnection = connectionsByConnection,
                             eplsNextTransferId = nextTransferId,
@@ -519,21 +522,21 @@ endpointLoop transport endpoint =
                       do withMVar (cciEndpointState endpoint) $ \st ->
                            case st of
                              CCIEndpointValid {cciConnectionsById = connectionsById} ->
-                               do case Map.lookup (toConnectionId connectionId) connectionsById of
-                                    Nothing -> dbg $ "Unknown connection ID: "++show connectionId
-                                    Just cciconn ->
-                                      modifyMVar (cciConnectionState cciconn) $ \connstate ->
-                                        case connstate of
-                                          CCIConnectionInit ->
-                                            do let maxmsg = CCI.connMaxSendSize conn
-                                               let newconnstate = CCIConnectionConnected
-                                                     {cciConnection = conn,
-                                                      cciMaxSendSize = maxmsg}
-                                               putMVar (cciReady cciconn) Nothing
-                                               return (newconnstate, ())
-                                          _ -> do dbg $ "Unexpected EvConnect for connection " ++
-                                                    show connectionId ++ " in state " ++ show connstate
-                                                  return (connstate, ())
+                               case Map.lookup (toConnectionId connectionId) connectionsById of
+                                 Nothing -> dbg $ "Unknown connection ID: "++show connectionId
+                                 Just cciconn ->
+                                   modifyMVar (cciConnectionState cciconn) $ \connstate ->
+                                     case connstate of
+                                       CCIConnectionInit ->
+                                         do let maxmsg = CCI.connMaxSendSize conn
+                                            let newconnstate = CCIConnectionConnected
+                                                  {cciConnection = conn,
+                                                   cciMaxSendSize = maxmsg}
+                                            putMVar (cciReady cciconn) Nothing
+                                            return (newconnstate, ())
+                                       _ -> do dbg $ "Unexpected EvConnect for connection " ++
+                                                 show connectionId ++ " in state " ++ show connstate
+                                               return (connstate, ())
                              _ -> dbg "Can't handle EvConnect when endpoint is closed"
                          return $ Just epls
                   CCI.EvAccept connectionId (Left status) ->
@@ -591,23 +594,26 @@ magicEndpointShutdown = "shutdown"
 -- event handler passes on the request to CH. This is all done synchronously, as
 -- we hold a lock on the endpoint for the duration.
 apiCloseEndPoint :: CCITransport -> CCIEndpoint -> IO ()
-apiCloseEndPoint transport endpoint =
-   (catch closeit handler)
-      where handler :: CCI.CCIException -> IO ()
-            handler _ = return ()
-            helloPacket = BSC.pack magicEndpointShutdown
-            closeit =
-               do modifyMVar_ (cciEndpointState endpoint) $ \st ->
-                     case st of
-                       CCIEndpointValid {cciConnectionsById = connections} ->
-                         do putEvent endpoint EndPointClosed
-                            mapM_ (swallowException . closeIndividualConnection transport endpoint) (Map.elems connections)
-                            swallowException $
-                               do sendSignalByConnect transport endpoint
-                                    (getEndpointAddress endpoint) helloPacket
-                                  takeMVar (cciEndpointFinalized endpoint)
-                            return CCIEndpointClosed
-                       _ -> dbg "Endpoint already closed" >> return st
+apiCloseEndPoint transport endpoint = catch closeit handler
+  where
+    handler :: CCI.CCIException -> IO ()
+    handler _ = return ()
+    helloPacket = BSC.pack magicEndpointShutdown
+    closeit =
+       modifyMVar_ (cciEndpointState endpoint) $ \st ->
+         case st of
+           CCIEndpointValid {cciConnectionsById = connections} -> do
+             putEvent endpoint EndPointClosed
+             mapM_ (swallowException . closeIndividualConnection transport endpoint)
+                   (Map.elems connections)
+             swallowException $ do
+                sendSignalByConnect transport
+                                    endpoint
+                                    (getEndpointAddress endpoint)
+                                    helloPacket
+                takeMVar (cciEndpointFinalized endpoint)
+             return CCIEndpointClosed
+           _ -> dbg "Endpoint already closed" >> return st
 
 
 sendSignalByConnect :: CCITransport
@@ -622,8 +628,8 @@ sendSignalByConnect transport endpoint epaddr bs =
               bs (translateReliability ReliableOrdered)
               (0::WordPtr) someTimeout
         someTimeout :: Integral a => Maybe a
-        someTimeout = fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
-        theerror = (TransportError ConnectTimeout "Connection reply timeout")
+        someTimeout = fmap fromIntegral $ cciConnectionTimeout $ cciParameters transport
+        theerror = TransportError ConnectTimeout "Connection reply timeout"
 
 -- | The procedure for creating a new connection is:
 --
@@ -655,45 +661,56 @@ apiConnect :: CCITransport
            -> ConnectHints
            -> IO (Either (TransportError ConnectErrorCode) Connection)
 apiConnect transport endpoint remoteaddress reliability _hints =
-  try $ mapCCIException (translateException ConnectFailed) $
-      do (cciconn, transportconn, _cid) <- createConn
-         timeoutMaybe (maybeTimeout) (TransportError ConnectTimeout "Connection reply timeout") (waitReady cciconn)
-         sendControlMessage transport endpoint cciconn (ControlMessageInitConnection reliability (getEndpointAddress endpoint))
-         -- putEvent endpoint (ConnectionOpened cid reliability remoteaddress) --I am pretty sure this line is not necessary
-         return transportconn
+    try $ mapCCIException (translateException ConnectFailed) $ do
+      (cciconn, transportconn, _cid) <- createConn
+      timeoutMaybe maybeTimeout
+                   (TransportError ConnectTimeout "Connection reply timeout")
+                   (waitReady cciconn)
+      sendControlMessage transport
+                         endpoint
+                         cciconn
+                         (ControlMessageInitConnection reliability
+                                                       (getEndpointAddress endpoint))
+      -- putEvent endpoint (ConnectionOpened cid reliability remoteaddress) --I am pretty sure this line is not necessary
+      return transportconn
    where
-        maybeTimeout :: Integral a => Maybe a
-        maybeTimeout = -- OR, alternatively: fmap fromIntegral $ connectTimeout hints
-                       fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
-        createConn =
-               modifyMVar (cciEndpointState endpoint) $ \st ->
-                   case st of
-                     CCIEndpointValid {cciNextConnectionId = cid, cciConnectionsById = connById} ->
-                             do
-                                connstate <- newMVar CCIConnectionInit
-                                ready <- newEmptyMVar
-                                let newmapById = Map.insert cid theconn connById
-                                    newst = st {cciNextConnectionId = cid+1,
-                                                cciConnectionsById = newmapById}
-                                    theconn = CCIConnection {cciConnectionId = cid,
-                                                             cciConnectionState = connstate,
-                                                             cciReady = ready}
-                                    transportconn = Connection {
-                                      send  = apiSend transport endpoint theconn,
-                                      close = apiCloseConnection transport endpoint theconn
-                                    }
-                                requestConnection (fromIntegral cid) -- this conversion (Int to WordPtr) is probablay okay
-                                return (newst,((theconn,transportconn, cid)))
-                     _ ->
-                         throwIO (TransportError ConnectFailed "Endpoint invalid")
-        requestConnection :: WordPtr -> IO ()
-        requestConnection contextId =
-         let localEndpoint = cciEndpoint endpoint
-             remoteAddress = (BSC.unpack $ endPointAddressToByteString remoteaddress)
-             helloPacket = BSC.empty
-          in CCI.connect localEndpoint remoteAddress
-                     helloPacket (translateReliability reliability)
-                     contextId maybeTimeout
+     maybeTimeout :: Integral a => Maybe a
+     maybeTimeout =
+       -- OR, alternatively: fmap fromIntegral $ connectTimeout hints
+       fmap fromIntegral $ cciConnectionTimeout (cciParameters transport)
+     createConn =
+       modifyMVar (cciEndpointState endpoint) $ \st ->
+         case st of
+           CCIEndpointValid
+             { cciNextConnectionId = cid
+             , cciConnectionsById = connById } -> do
+               connstate <- newMVar CCIConnectionInit
+               ready <- newEmptyMVar
+               let newmapById = Map.insert cid theconn connById
+                   newst = st { cciNextConnectionId = cid+1
+                              , cciConnectionsById = newmapById }
+                   theconn = CCIConnection
+                     { cciConnectionId = cid
+                     , cciConnectionState = connstate
+                     , cciReady = ready}
+                   transportconn = Connection
+                     { send  = apiSend transport endpoint theconn
+                     , close = apiCloseConnection transport endpoint theconn
+                     }
+               requestConnection (fromIntegral cid) -- this conversion (Int to WordPtr) is probablay okay
+               return (newst, (theconn,transportconn, cid))
+           _ -> throwIO $ TransportError ConnectFailed "Endpoint invalid"
+     requestConnection :: WordPtr -> IO ()
+     requestConnection contextId =
+       let localEndpoint = cciEndpoint endpoint
+           remoteAddress = BSC.unpack $ endPointAddressToByteString remoteaddress
+           helloPacket   = BSC.empty
+       in CCI.connect localEndpoint
+                      remoteAddress
+                      helloPacket
+                      (translateReliability reliability)
+                      contextId
+                      maybeTimeout
 
 -- | Sending is silent (viz. 'CCI.SEND_SILENT'). This corresponds to the
 -- Unified's preference. We distinguish control messages from regular messages
@@ -734,24 +751,28 @@ sendCore :: CCITransport
          -> [ByteString]
          -> IO (Either (TransportError SendErrorCode) ())
 sendCore transport endpoint conn context isCtrlMsg bs =
-  try $ mapCCIException (translateException SendFailed) $
-     withMVar (cciConnectionState conn) $ \st ->
-        case st of
-           CCIConnectionConnected {cciMaxSendSize = maxMessageLength,
-                                   cciConnection = realconnection} ->
-             if (messageLength > fromIntegral maxMessageLength && not isCtrlMsg)
-                then sendRMA transport endpoint conn realconnection bs context
-                else sendSimple realconnection augmentedbs context
-           CCIConnectionInit -> dbg "Connection not initialized" >>
-                    throwIO (TransportError SendClosed "Connection not initialized")
-           CCIConnectionClosed -> dbg "Connection already closed" >>
-                    throwIO (TransportError SendClosed "Connection already closed")
-
-    where messageLength = sum (map BSC.length bs)
-          augmentedbs = msgprefix:bs
-          msgprefix = case isCtrlMsg of
-                        True -> BSC.singleton (chr 1)
-                        False -> BSC.singleton (chr 0)
+    try $ mapCCIException (translateException SendFailed) $
+       withMVar (cciConnectionState conn) $ \st ->
+          case st of
+            CCIConnectionConnected
+              { cciMaxSendSize = maxMessageLength
+              , cciConnection = realconnection } ->
+              if messageLength > fromIntegral maxMessageLength && not isCtrlMsg
+              then sendRMA transport endpoint conn realconnection bs context
+              else sendSimple realconnection augmentedbs context
+            CCIConnectionInit -> do
+              dbg "Connection not initialized"
+              throwIO $ TransportError SendClosed "Connection not initialized"
+            CCIConnectionClosed -> do
+              dbg "Connection already closed"
+              throwIO $ TransportError SendClosed "Connection already closed"
+  where
+    messageLength = sum (map BSC.length bs)
+    augmentedbs = msgprefix:bs
+    msgprefix =
+        if isCtrlMsg
+        then BSC.singleton (chr 1)
+        else BSC.singleton (chr 0)
 
 -- | For RMA transmissions, we do this:
 --
@@ -795,7 +816,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
          finalizeMessage ok remoteid =
                 ControlMessageFinalizeRMA {rmaOk = ok, rmaRemoteFinalizingId = remoteid}
          encodedFinalization ok remoteid =
-                BSC.concat ((BSC.singleton '\1') : (BSL.toChunks $ encode $ finalizeMessage ok remoteid))
+                BSC.concat (BSC.singleton '\1' : (BSL.toChunks $ encode $ finalizeMessage ok remoteid))
 
          eraseRmaState =
            modifyMVar_ (cciEndpointState endpoint)
@@ -873,7 +894,7 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                chunkSize :: Word32
                chunkSize =
                  let notZero 0 = Nothing
-                     notZero n = Just $ n
+                     notZero n = Just n
                   in minimum $ catMaybes [Just $ cciMaxRMABuffer (cciParameters transport),
                                           notZero $ fromIntegral $ CCI.rmaWriteLength (cciRMAAlignments endpoint),
                                           notZero $ fromIntegral $ CCI.rmaReadLength (cciRMAAlignments endpoint)]
@@ -885,12 +906,12 @@ sendRMA transport endpoint _conn realconn bs _ctx =
                -- obey both rmaWriteLength and rmaReadLength, but playing it
                -- safe by taking the minimum seems wise.
                chunks =
-                   let (fullchunks,partialchunk) = (fromIntegral msgLength) `divMod` chunkSize
+                   let (fullchunks,partialchunk) = fromIntegral msgLength `divMod` chunkSize
                        maybePartialChunk =
                                    if partialchunk==0
                                       then []
                                       else [(fullchunks*chunkSize,partialchunk)]
-                    in genericTake fullchunks ([ (offsets,chunkSize) | offsets<-[0,chunkSize..]])
+                    in genericTake fullchunks [ (offsets,chunkSize) | offsets<-[0,chunkSize..]]
                            ++ maybePartialChunk
 
 -- TODO: draw buffers from a pool of locally stored buffers, rather than
@@ -953,7 +974,7 @@ closeIndividualConnection transport endpoint conn =
                  transportconn <- modifyMVar (cciConnectionState conn) $ \connst ->
                     case connst of
                       CCIConnectionConnected {cciConnection=realconn} ->
-                         return $ (CCIConnectionClosed,Just realconn)
+                         return (CCIConnectionClosed,Just realconn)
                       CCIConnectionClosed -> dbg "Connection is already closed" >>
                          return (CCIConnectionClosed,Nothing)
                       CCIConnectionInit -> dbg "Connection still initializing"  >>
