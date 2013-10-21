@@ -7,6 +7,7 @@
 {-# LANGUAGE ForeignFunctionInterface #-}
 module Network.Transport.CCI.Pool
   ( Pool
+  , PoolRef
   , Buffer
   , newPool
   , freePool
@@ -17,8 +18,6 @@ module Network.Transport.CCI.Pool
   , convertBufferToByteString
   ) where
 
-import Network.Transport.CCI.ByteString (unsafePackMallocCStringLen)
-
 import Control.Applicative ((<$>))
 import Control.Monad ( when )
 import Control.Exception (catch, IOException)
@@ -28,16 +27,18 @@ import qualified Data.Map as Map
 
 import qualified Data.ByteString.Char8 as BSC
 import Data.ByteString.Char8 (ByteString)
-import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen, unsafePackCStringFinalizer)
 
+import Data.IORef
 import qualified Data.List as List (find, delete, deleteBy, insertBy)
 import Data.Maybe (fromJust)
+import Data.Foldable ( forM_ )
 import Data.Ord (comparing)
 import Foreign.C.Types ( CChar, CSize(..), CInt(..) )
 import Foreign.C.String (CStringLen)
 import Foreign.Marshal.Alloc (mallocBytes, free, alloca)
 import Foreign.Marshal.Utils (copyBytes)
-import Foreign.Ptr (Ptr)
+import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable ( peek )
 import Prelude
 
@@ -75,6 +76,8 @@ data Pool handle = Pool
         pAvailableLru :: [BufferId]
      }
 
+type PoolRef handle = IORef (Maybe (Pool handle))
+
 -- | Returns the handle of the given buffer
 getBufferHandle :: Buffer handle -> handle
 getBufferHandle = bHandle
@@ -84,11 +87,12 @@ dbg = putStrLn
 
 -- | Deallocates and unregisters all buffers managed
 -- by the given pool.
-freePool :: Pool handle -> IO ()
-freePool pool =
-  let inuse = Map.elems (pInUse pool)
-      notinuse = pAvailableBySize pool
-   in mapM_ (destroyBuffer pool) (inuse++notinuse)
+freePool :: PoolRef handle -> IO ()
+freePool rPool = do
+    mPool <- atomicModifyIORef rPool $ \mPool -> (Nothing, mPool)
+    forM_ mPool $ \pool -> do
+      mapM_ (pUnregister pool) $ map bHandle $ Map.elems $ pInUse pool
+      mapM_ (destroyBuffer pool) $ pAvailableBySize pool
 
 -- | Create a new pool. All buffers will be aligned at the given alignment (or
 -- 0 for any alignment). Allocated, but unused buffers will be harvested after
@@ -108,96 +112,111 @@ newPool alignment maxbuffercount reg unreg =
 
 -- | Release the given buffer. It won't be unregistered and deallocated
 -- immediately, but simply placed on the available list.
-freeBuffer :: Pool handle -> Buffer handle -> IO (Pool handle)
-freeBuffer pool buffer =
-  case Map.lookup (bId buffer) (pInUse pool) of
-    Just buf | bSize buf == bSize buffer ->
-       let newpool = pool {
-                       pInUse = Map.delete (bId buffer) (pInUse pool),
-                       pAvailableBySize = List.insertBy (comparing bSize) buffer (pAvailableBySize pool),
-                       pAvailableLru = bId buf : pAvailableLru pool
-                      }
-        in return newpool
-    _ -> dbg "Trying to free buffer that I don't know about" >> return pool
+freeBuffer :: PoolRef handle -> Buffer handle -> IO ()
+freeBuffer rPool buffer = do
+    mPoolOk <- atomicModifyIORef rPool $ \mPool -> case mPool of
+      Nothing -> (mPool, Right False)
+      Just pool -> do
+        case Map.lookup (bId buffer) (pInUse pool) of
+          Just buf | bSize buf == bSize buffer ->
+            if pMaxBufferCount pool <= length (pAvailableLru pool)
+              then let newpool = pool
+                         { pInUse = Map.delete (bId buffer) (pInUse pool) }
+                    in (Just newpool, Left pool)
+              else let newpool = pool
+                         { pInUse = Map.delete (bId buffer) (pInUse pool)
+                         , pAvailableBySize = List.insertBy (comparing bSize) buffer (pAvailableBySize pool)
+                         , pAvailableLru = bId buf : pAvailableLru pool
+                         }
+                    in (Just newpool, Right True)
+          _ -> (mPool, Right True)
+
+    case mPoolOk of
+      Right False -> freeAligned (bStart buffer)
+      Left pool   -> destroyBuffer pool buffer
+      Right True  -> return ()
 
 -- | Allocate excess buffers up to our limit
-spares :: Pool handle -> Int -> IO (Pool handle)
-spares pool defaultsize =
-  if (pMaxBufferCount pool > length (pAvailableLru pool))
-     then do res <- newBuffer pool (Left defaultsize)
-             case res of
-                Just (newpool, newbuf) ->
-                    freeBuffer newpool newbuf
-                Nothing -> return pool
-     else return pool
+spares :: PoolRef handle -> Int -> IO ()
+spares rPool defaultsize = do
+    mPool <- readIORef rPool
+    forM_ mPool $ \pool ->
+      if (pMaxBufferCount pool > length (pAvailableLru pool))
+        then do res <- newBuffer rPool defaultsize
+                case res of
+                  Just newbuf ->
+                    freeBuffer rPool newbuf
+                  Nothing -> return ()
+        else return ()
 
 -- | Remove and destroy excess buffers beyond our limit
-cleanup :: Pool handle -> IO (Pool handle)
-cleanup pool =
-  if (pMaxBufferCount pool < length (pAvailableLru pool))
-     then
+cleanup :: PoolRef handle -> IO ()
+cleanup rPool = do
+    mPool <- readIORef rPool
+    forM_ mPool $ \pool ->
+      if (pMaxBufferCount pool < length (pAvailableLru pool)) then
         let killme = let killmeId = last (pAvailableLru pool)
                       in fromJust $ List.find (\b -> bId b == killmeId) (pAvailableBySize pool)
             newpool = pool { pAvailableLru = init $ pAvailableLru pool,
                              pAvailableBySize = List.deleteBy byId killme (pAvailableBySize pool)}
          in do destroyBuffer pool killme
                return newpool
-     else return pool
-    where byId a b = bId a == bId b
+      else return pool
+  where
+    byId a b = bId a == bId b
 
 destroyBuffer :: Pool handle -> Buffer handle -> IO ()
 destroyBuffer pool buffer =
  do (pUnregister pool) (bHandle buffer)
-    freeAligned (bStart buffer,bSize buffer)
+    freeAligned $ bStart buffer
 
 -- | Find an available buffer of the appropriate size, or allocate a new one if
 -- such a buffer is not already allocated. You will get back an updated pool and
--- the buffer object. You may provide the size of the desired buffer either as
--- an Int or as a ByteString. In the latter case, the contents of the ByteString
--- will be copied into the buffer.
-newBuffer :: Pool handle -> Either Int ByteString -> IO (Maybe (Pool handle, Buffer handle))
-newBuffer pool content =
-   case findAndRemove goodSize (pAvailableBySize pool) of
-      (_newavailable,Nothing) ->
-         do mres <- allocAligned' (pAlign pool) (neededSize content)
-            case mres of
-              Nothing -> return Nothing
-              Just cstr@(start,_) -> do
-                case content of
-                  Right bs ->
-                    copyTo bs start
-                  Left _ -> return ()
-                handle <- (pRegister pool) cstr
-                let newbuf =
-                       Buffer {
-                         bId = pNextId pool,
-                         bStart = start,
-                         bSize = neededSize content,
-                         bHandle = handle
-                      }
-                    newpool = pool {
-                         pNextId = (pNextId pool)+1,
-                         pInUse = Map.insert (bId newbuf) newbuf (pInUse pool)
-                      }
-                cleanpool <- cleanup newpool -- We remove at most unused buffer beyond the limit here.
-                                             -- We don't want to constnatly alloc/dealloc a same-sized buffer, so we go gradual.
-                return $ Just (cleanpool, newbuf)
-      (newavailable,Just buf) ->
-         let newpool = pool {pAvailableBySize = newavailable,
-                             pInUse = Map.insert (bId buf) buf (pInUse pool),
-                             pAvailableLru = List.delete (bId buf) (pAvailableLru pool)}
-          in do case content of
-                  Right bs ->
-                    copyTo bs (bStart buf)
-                  Left _ -> return ()
-                cleanpool <- cleanup newpool -- We remove at most unused buffer beyond the limit here.
-                return $ Just (cleanpool, buf)
-    where goodSize b = bSize b >= (neededSize content)
-          neededSize (Left n) = n
-          neededSize (Right str) = BSC.length str
+-- the buffer object. You may provide the size of the desired buffer.
+newBuffer :: PoolRef handle -> Int -> IO (Maybe (Buffer handle))
+newBuffer rPool rmaSize = do
+    mres <- atomicModifyIORef rPool $ \mPool -> case mPool of
+      Nothing -> (mPool, Left Nothing)
+      Just pool -> case findAndRemove goodSize (pAvailableBySize pool) of
+        (_newavailable, Nothing) ->
+          ( Just pool { pNextId = pNextId pool + 1 }
+          , Left mPool
+          )
+        (newavailable, Just buf) ->
+          ( Just pool
+                 { pAvailableBySize = newavailable
+                 , pInUse = Map.insert (bId buf) buf (pInUse pool)
+                 , pAvailableLru = List.delete (bId buf) (pAvailableLru pool)
+                 }
+          , Right buf
+          )
+    case mres of
+      Right buf  -> return $ Just buf
+      Left Nothing -> return Nothing
+      Left (Just pool0)  -> do
+        mbuf <- allocAligned' (pAlign pool0) rmaSize
+        case mbuf of
+          Nothing -> return Nothing
+          Just cstr@(start,_) -> do
+            handle <- (pRegister pool0) cstr
+            let newbuf = Buffer
+                  { bId = pNextId pool0
+                  , bStart = start
+                  , bSize = rmaSize
+                  , bHandle = handle
+                  }
+            poolOk <- atomicModifyIORef rPool $ maybe (Nothing,False) $ \pool ->
+              ( Just pool { pInUse = Map.insert (bId newbuf) newbuf (pInUse pool) }
+              , True
+              )
+            if poolOk then return $ Just newbuf
+             else error "network-transport-cci: PANIC! Pool was released while still in use."
 
-freeAligned :: CStringLen -> IO ()
-freeAligned = free . fst
+  where
+    goodSize b = bSize b >= rmaSize
+
+freeAligned :: Ptr CChar -> IO ()
+freeAligned = free
 
 allocAligned' :: Int -> Int -> IO (Maybe CStringLen)
 allocAligned' a s =
@@ -210,20 +229,6 @@ allocAligned align size = alloca $ \ptr ->
         when (ret /= 0) $ error $ "allocAligned: " ++ show ret
         res <- peek ptr
         return (res, size)
-
-copyTo :: ByteString -> Ptr CChar -> IO ()
-copyTo bs pstr =
-   unsafeUseAsCStringLen bs $ \(cs,_) ->
-       copyBytes pstr cs (BSC.length bs)
-
-{-
-moveToFront :: Eq a => a -> [a] -> [a]
-moveToFront x xs = go [] xs
-  where go before [] = x:reverse before
-        go before (z:zs) | z==x = z:(reverse before) ++ zs
-        go before (z:zs) = go (z:before) zs
-
--}
 
 -- | View the contents of the buffer as a bytestring. Currently O(n).
 getBufferByteString :: Buffer handle -> IO ByteString
@@ -239,10 +244,7 @@ findAndRemove f xs = go [] xs
 -- | A zero-copy alternative to getBufferByteString. The buffer is removed from
 -- the pool; after this call, the Buffer object is invalid. The resulting
 -- ByteString occupies the same space and will be handled normally by the gc.
-convertBufferToByteString :: Pool handle -> Buffer handle -> IO (Pool handle, ByteString)
-convertBufferToByteString pool buffer =
-   let newpool = pool {pInUse = Map.delete (bId buffer) (pInUse pool)}
-    in do (pUnregister pool) (bHandle buffer)
-          bs <- unsafePackMallocCStringLen (bStart buffer, bSize buffer)
-          -- TODO we should reinsert available buffer into the pool, so we're ready for the next msg
-          return (newpool, bs)
+convertBufferToByteString :: PoolRef handle -> Buffer handle -> IO ByteString
+convertBufferToByteString rPool buffer =
+    unsafePackCStringFinalizer (castPtr $ bStart buffer) (bSize buffer)
+      $ freeBuffer rPool buffer

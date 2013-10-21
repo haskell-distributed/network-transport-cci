@@ -35,7 +35,7 @@ module Network.Transport.CCI
   , ReceiveStrategy(..)
   ) where
 
-import qualified Network.Transport.CCI.Pool as Pool
+import Network.Transport.CCI.Pool as Pool
 
 import qualified Network.CCI as CCI
 import Network.Transport.Internal (timeoutMaybe)
@@ -87,6 +87,7 @@ import Control.Exception
     )
 import Data.Char (chr, ord)
 import Data.Foldable (mapM_)
+import Data.IORef
 import Data.List (genericTake)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Typeable (Typeable)
@@ -172,6 +173,7 @@ data CCIEndpoint = CCIEndpoint
     , cciRMAAlignments :: CCI.RMAAlignments
     , cciEndpointState :: MVar CCIEndpointState
     , cciEndpointFinalized :: MVar ()
+    , cciPool :: Pool.PoolRef CCI.RMALocalHandle
     }
 
 type RMATransferId = Int
@@ -296,6 +298,18 @@ apiNewEndPoint transport =
                          , cciNextConnectionId = 0
                          , cciEndpointThread = thrd
                          , cciConnectionsById = Map.empty }
+          rPool <- newIORef $ Just $
+            let mostRestrictiveAlignment = maximum $
+                  [ CCI.rmaWriteLocalAddr
+                  , CCI.rmaWriteRemoteAddr
+                  , CCI.rmaReadLocalAddr
+                  , CCI.rmaReadRemoteAddr
+                  ] <*> pure align
+             in Pool.newPool
+                  (fromEnum mostRestrictiveAlignment)
+                  (cciOutstandingRMABuffers $ cciParameters transport)
+                  (\cstr -> CCI.rmaRegister endpoint cstr CCI.RMA_WRITE)
+                  (CCI.rmaDeregister endpoint)
           let myEndpoint = CCIEndpoint
                 { cciFileDescriptor = fd
                 , cciEndpoint = endpoint
@@ -304,7 +318,9 @@ apiNewEndPoint transport =
                 , cciRMAAlignments = align
                 , cciTransportEndpoint = transportEndPoint
                 , cciEndpointState = endpstate
-                , cciEndpointFinalized = finalized }
+                , cciEndpointFinalized = finalized
+                , cciPool = rPool
+                }
               transportEndPoint = EndPoint
                 { receive = readChan chan
                 , address = EndPointAddress $ BSC.pack uri
@@ -356,36 +372,24 @@ data EndpointLoopState = EndpointLoopState
     , eplsNextTransferId :: !RMATransferId
       -- TODO IntMap
     , eplsTransfers :: Map.Map RMATransferId (Pool.Buffer CCI.RMALocalHandle)
-    , eplsPool :: Pool.Pool CCI.RMALocalHandle
     }
 
 endpointLoop :: CCITransport -> CCIEndpoint -> IO ()
-endpointLoop transport endpoint = loop newEpls
+endpointLoop transport endpoint =  loop newEpls
   where
-    mostRestrictiveAlignment align =
-      maximum $ [ CCI.rmaWriteLocalAddr
-                , CCI.rmaWriteRemoteAddr
-                , CCI.rmaReadLocalAddr
-                , CCI.rmaReadRemoteAddr] <*> pure align
     newEpls = EndpointLoopState
                 { eplsNextConnectionId = 0
                 , eplsConnectionsByConnection = Map.empty
                 , eplsNextTransferId = 0
                 , eplsTransfers = Map.empty
-                , eplsPool =
-                    Pool.newPool
-                      (fromEnum $ mostRestrictiveAlignment $ cciRMAAlignments endpoint)
-                      (cciOutstandingRMABuffers $ cciParameters transport)
-                      (\cstr -> CCI.rmaRegister (cciEndpoint endpoint)
-                                                cstr
-                                                CCI.RMA_WRITE)
-                      (CCI.rmaDeregister (cciEndpoint endpoint)) }
+                }
     loop :: EndpointLoopState -> IO ()
     loop epls@EndpointLoopState { eplsNextConnectionId = nextConnectionId
                                 , eplsConnectionsByConnection = connectionsByConnection
                                 , eplsNextTransferId = nextTransferId
                                 , eplsTransfers = transfers
-                                , eplsPool = pool } = do
+                                }
+         = do
       ret <- receiveEvent transport endpoint $ \ev -> case ev of
         -- The connection packet will be blank, in which case this is
         -- a real connection request, orit can contain
@@ -399,7 +403,7 @@ endpointLoop transport endpoint = loop newEpls
                         return $ Just epls {eplsNextConnectionId = nextConnectionId+1}
                shutdown | shutdown == magicEndpointShutdown ->
                      do CCI.reject sev
-                        Pool.freePool pool
+                        Pool.freePool (cciPool endpoint)
                         return Nothing
                _ ->  do dbg "Unknown connection magic word"
                         CCI.reject sev
@@ -440,19 +444,20 @@ endpointLoop transport endpoint = loop newEpls
                                         Map.delete conn connectionsByConnection }
               ControlMessageInitRMA { rmaSize = rmasize
                                     , rmaId = orginatingId } -> do
-                mres <- Pool.newBuffer pool (Left rmasize)
+                mres <- Pool.newBuffer (cciPool endpoint) rmasize
                 case mres of
-                  Just (newpool, buffer) -> do
+                  Just buffer -> do
                     localhb <- CCI.rmaHandle2ByteString (Pool.getBufferHandle buffer)
                     let notify = ControlMessageAckInitRMA
                                    { rmaAckOrginatingId=orginatingId
-                                   , rmaAckRemote = Just (nextTransferId, localhb) }
+                                   , rmaAckRemote = Just (nextTransferId, localhb)
+                                   }
                     sendControlMessageInside transport endpoint conn notify
                     return $ Just epls { eplsNextTransferId = nextTransferId + 1
                                        , eplsTransfers = Map.insert nextTransferId
                                                                     buffer
                                                                     transfers
-                                       , eplsPool = newpool }
+                                       }
                   Nothing -> do
                     sendControlMessageInside
                       transport
@@ -485,26 +490,24 @@ endpointLoop transport endpoint = loop newEpls
                            putEvent endpoint $ Received connid [buffermsg]
                          closeBufferNoCopy :: IO EndpointLoopState
                          closeBufferNoCopy = do
-                           newpool <-
-                             if ok
+                           if ok
                              then do
-                               (newpool, buffermsg) <-
-                                 Pool.convertBufferToByteString pool buffer
+                               buffermsg <- Pool.convertBufferToByteString
+                                              (cciPool endpoint) buffer
                                pushEvent buffermsg
-                               return newpool
-                             else Pool.freeBuffer pool buffer
+                             else Pool.freeBuffer (cciPool endpoint) buffer
                            return $ epls { eplsTransfers =
                                              Map.delete remoteid transfers
-                                         , eplsPool = newpool }
+                                         }
                          closeBufferReUse :: IO EndpointLoopState
                          closeBufferReUse = do
                            when ok $ do
                              buffermsg <- Pool.getBufferByteString buffer
                              pushEvent buffermsg
-                           newpool <- Pool.freeBuffer pool buffer
+                           Pool.freeBuffer (cciPool endpoint) buffer
                            return $ epls { eplsTransfers =
                                              Map.delete remoteid transfers
-                                         , eplsPool = newpool}
+                                         }
                      Just <$> closeBufferNoCopy
                      -- TODO there is some ideal tradeoff in message size;
                      -- smaller messages should be have their buffers reuused,
