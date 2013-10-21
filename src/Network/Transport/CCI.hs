@@ -37,12 +37,8 @@ import qualified Data.Map as Map
 
 import Data.Binary
     ( Binary
-    , put
-    , get
-    , getWord8
-    , putWord8
-    , encode
     , decode
+    , encode
     )
 
 import Data.ByteString (ByteString)
@@ -72,6 +68,7 @@ import Data.Maybe (catMaybes, fromMaybe)
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
 import Foreign.Ptr (WordPtr)
+import GHC.Generics (Generic)
 
 import System.Posix.Types (Fd)
 
@@ -190,7 +187,7 @@ data CCIConnectionState
 data CCIErrorCode
     = CCICreateTransportFailed
     | CCIDisconnectFailed
-    deriving (Show, Typeable, Eq)
+    deriving (Eq, Show, Generic, Typeable)
 
 -- | In addition to regular message (which will be passed on to CH and
 -- eventually to a user process), we can send control messages, which will be
@@ -212,43 +209,14 @@ data ControlMessage
     | ControlMessageFinalizeRMA
       { rmaOk :: Bool
       , rmaRemoteFinalizingId :: RMATransferId }
-    deriving (Typeable)
+    deriving (Generic, Typeable)
 
 -- This really belongs in Network.Transport
-instance Binary Reliability where
-  put ReliableOrdered = putWord8 0
-  put ReliableUnordered  = putWord8 1
-  put Unreliable = putWord8 2
-  get = do hdr <- getWord8
-           case hdr of
-              0 -> return ReliableOrdered
-              1 -> return ReliableUnordered
-              2 -> return Unreliable
-              _ -> fail "Reliability.get: invalid"
+deriving instance Generic Reliability
+deriving instance Typeable Reliability
+instance Binary Reliability
 
-instance Binary ControlMessage where
-  put ControlMessageCloseConnection = putWord8 0
-  put (ControlMessageInitConnection r ep) = putWord8 1 >> put r >> put ep
-  put (ControlMessageInitRMA rs rid repa) = putWord8 2 >> put rs >> put rid >> put repa
-  put (ControlMessageAckInitRMA roid rr) = putWord8 3 >> put roid >> put rr
-  put (ControlMessageFinalizeRMA rok rfin) = putWord8 4 >> put rok >> put rfin
-  get = do hdr <- getWord8
-           case hdr of
-             0 -> return ControlMessageCloseConnection
-             1 -> do r <- get
-                     ep <- get
-                     return $ ControlMessageInitConnection r ep
-             2 -> do rs <- get
-                     rid <- get
-                     repa <- get
-                     return $ ControlMessageInitRMA rs rid repa
-             3 -> do roid <- get
-                     rr <- get
-                     return $ ControlMessageAckInitRMA roid rr
-             4 -> do rok <- get
-                     rfin <- get
-                     return $ ControlMessageFinalizeRMA rok rfin
-             _ -> fail "ControlMessage.get: invalid"
+instance Binary ControlMessage
 
 getEndpointAddress :: CCIEndpoint -> EndPointAddress
 getEndpointAddress ep = EndPointAddress $ BSC.pack (cciUri ep)
