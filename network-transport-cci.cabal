@@ -36,12 +36,12 @@ Executable CCITest2
 Test-Suite TestCH
   Type:            exitcode-stdio-1.0
   Main-Is:         TestCH.hs
-  Build-Depends:   ansi-terminal >= 0.5 && < 0.6,
+  Build-Depends:   ansi-terminal >= 0.5 && < 0.7,
                    base >= 4.4 && < 5,
                    binary >= 0.5,
                    bytestring >= 0.9 && < 0.11,
                    containers >= 0.4 && < 0.6,
-                   cci,
+                   network-transport-cci,
                    data-accessor >= 0.2 && < 0.3,
                    distributed-process >= 0.4 && < 0.5,
                    ghc-prim >= 0.2 && < 0.4,
@@ -64,16 +64,16 @@ Test-Suite TestCH
                    TemplateHaskell, BangPatterns,
                    CPP
   ghc-options:     -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
-  HS-Source-Dirs:  tests src
+  HS-Source-Dirs:  tests
 
 Test-Suite TestCCI
   Type:            exitcode-stdio-1.0
   Main-Is:         TestCCI.hs
-  Build-Depends:   ansi-terminal >= 0.5 && < 0.6,
+  Build-Depends:   ansi-terminal >= 0.5 && < 0.7,
                    base >= 4.3 && < 5,
                    binary >= 0.5,
                    bytestring >= 0.9 && < 0.11,
-                   cci,
+                   network-transport-cci,
                    containers >= 0.4 && < 0.6,
                    data-accessor >= 0.2 && < 0.3,
                    distributed-process >= 0.4 && < 0.5,
@@ -90,4 +90,75 @@ Test-Suite TestCCI
                    RankNTypes,
                    OverlappingInstances,
                    CPP
-  HS-Source-Dirs:  tests src
+  HS-Source-Dirs:  tests
+
+Test-Suite test-ch-core
+  Type:              exitcode-stdio-1.0
+  Main-Is:           test-ch.hs
+  CPP-Options:       -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.CH
+  Build-Depends:     base >= 4.4 && < 5,
+                     network-transport-cci,
+                     distributed-process-tests >= 0.4,
+                     network >= 2.3 && < 2.5,
+                     network-transport >= 0.3 && < 0.4,
+                     test-framework >= 0.6 && < 0.9
+  Extensions:        CPP
+  ghc-options:       -Wall -threaded -debug -eventlog -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:    tests
+
+Test-Suite test-ch-closure
+  Type:              exitcode-stdio-1.0
+  Main-Is:           test-ch.hs
+  CPP-Options:       -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.Closure
+  Build-Depends:     base >= 4.4 && < 5,
+                     network-transport-cci,
+                     distributed-process-tests >= 0.4,
+                     network >= 2.3 && < 2.5,
+                     network-transport >= 0.3 && < 0.4,
+                     test-framework >= 0.6 && < 0.9
+  Extensions:        CPP
+  ghc-options:       -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:    tests
+
+Test-Suite test-ch-stat
+  Type:              exitcode-stdio-1.0
+  Main-Is:           test-ch.hs
+  CPP-Options:       -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.Stats
+  Build-Depends:     base >= 4.4 && < 5,
+                     network-transport-cci,
+                     distributed-process-tests >= 0.4,
+                     network >= 2.3 && < 2.5,
+                     network-transport >= 0.3 && < 0.4,
+                     test-framework >= 0.6 && < 0.9
+  Extensions:        CPP
+  ghc-options:       -Wall -debug -eventlog -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:    tests
+
+
+Test-Suite test-ch-mx
+  Type:              exitcode-stdio-1.0
+  Main-Is:           test-ch.hs
+  CPP-Options:       -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.Mx
+  Build-Depends:     base >= 4.4 && < 5,
+                     network-transport-cci,
+                     distributed-process-tests >= 0.4,
+                     network >= 2.3 && < 2.5,
+                     network-transport >= 0.3 && < 0.4,
+                     test-framework >= 0.6 && < 0.9
+  Extensions:        CPP
+  ghc-options:       -Wall -debug -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:    tests
+
+Test-Suite test-ch-tracing
+  Type:              exitcode-stdio-1.0
+  Main-Is:           test-ch.hs
+  CPP-Options:       -DTEST_SUITE_MODULE=Control.Distributed.Process.Tests.Tracing
+  Build-Depends:     base >= 4.4 && < 5,
+                     network-transport-cci,
+                     distributed-process-tests >= 0.4,
+                     network >= 2.3 && < 2.5,
+                     network-transport >= 0.3 && < 0.4,
+                     test-framework >= 0.6 && < 0.9
+  Extensions:        CPP
+  ghc-options:       -Wall -debug -eventlog -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:    tests
