@@ -927,7 +927,7 @@ sendRMA transport endpoint _conn realconn bs _ctx = do
     chunkSize =
       let notZero 0 = Nothing
           notZero n = Just n
-      in minimum $ catMaybes [ Just $ cciMaxRMABuffer (cciParameters transport)
+      in minimum $ catMaybes [ Just (maxBound :: Word32)
                              , notZero $ fromIntegral $ CCI.rmaWriteLength (cciRMAAlignments endpoint)
                              , notZero $ fromIntegral $ CCI.rmaReadLength (cciRMAAlignments endpoint) ]
 
