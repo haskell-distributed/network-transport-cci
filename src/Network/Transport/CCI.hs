@@ -3,7 +3,31 @@
 -- License   : BSD3
 --
 -- Cloud Haskell backend supporting CCI, via CCI bindings.
-
+--
+-- A 'Network.Transport.EndPoint' is implemented with a 'Network.CCI.Endpoint'.
+--
+-- A 'Network.Transport.Connection' is implemented with a
+-- 'Network.CCI.Connection'.
+--
+-- Small messages are sent with CCI active messages and the larger messages
+-- are sent with RMA operations.
+--
+-- The buffers holding large messages are registered for RMA in the sender
+-- side. If the application reuses these buffers for multiple messages, the
+-- cost of subsequent registrations diminishes. In the future we expect to
+-- provide a transport specific call to pre-register buffers.
+--
+-- The receiver side registers buffers for RMA when requested by a sender.
+-- A pool of registered buffers is maintained, from which registered buffers
+-- are grabbed on demand.
+--
+-- When the receiver side gets a large message in a registered buffer, it
+-- handles the buffer to the application as a ByteString. When the ByteString
+-- is garbage collected the buffer is returned to the pool. In the future we
+-- expect to unregister buffers before they are returned to the pool if
+-- too many buffers are registered. We also expect to offer transport specific
+-- calls to promptly unregister or return buffers to the pool.
+--
 module Network.Transport.CCI
   ( createTransport
   , CCIParameters(..)
