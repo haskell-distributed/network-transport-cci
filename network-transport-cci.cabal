@@ -165,3 +165,13 @@ Test-Suite test-ch-tracing
   Extensions:        CPP
   ghc-options:       -Wall -debug -eventlog -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
   HS-Source-Dirs:    tests
+
+Test-Suite network-transport-cci-tests
+  Type:            exitcode-stdio-1.0
+  Main-Is:         TestCCI.hs
+  Build-Depends:   base >= 4.4 && < 5,
+                   network-transport >= 0.2 && < 0.4,
+                   network-transport-cci,
+                   network-transport-tests >= 0.1.0.1 && < 0.2
+  ghc-options:     -Wall -threaded -rtsopts -with-rtsopts=-N -fno-warn-unused-do-bind
+  HS-Source-Dirs:  tests
