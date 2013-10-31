@@ -20,7 +20,7 @@ module Network.Transport.CCI.Pool
 
 import Control.Applicative ((<$>))
 import Control.Monad ( when )
-import Control.Exception (catch, IOException)
+import Control.Exception (catch, IOException, mask_, bracketOnError)
 
 import Data.Map (Map)
 import qualified Data.Map as Map
@@ -96,7 +96,7 @@ dbg = putStrLn
 -- | Deallocates and unregisters all buffers managed
 -- by the given pool.
 freePool :: PoolRef handle -> IO ()
-freePool rPool = do
+freePool rPool = mask_ $ do
     mPool <- atomicModifyIORef rPool $ \mPool -> (Nothing, mPool)
     forM_ mPool $ \pool -> do
       mapM_ (pUnregister pool) $ map bHandle $ Map.elems $ pInUse pool
@@ -121,7 +121,7 @@ newPool alignment maxbuffercount reg unreg =
 -- | Release the given buffer. It won't be unregistered and deallocated
 -- immediately, but simply placed on the available list.
 freeBuffer :: PoolRef handle -> Buffer handle -> IO ()
-freeBuffer rPool buffer = do
+freeBuffer rPool buffer = mask_ $ do
     mPoolOk <- atomicModifyIORef rPool $ \mPool -> case mPool of
       Nothing -> (mPool, Right False)
       Just pool -> do
@@ -152,7 +152,7 @@ freeBuffer rPool buffer = do
 
 -- | Allocate excess buffers up to our limit
 spares :: PoolRef handle -> Int -> IO ()
-spares rPool defaultsize = do
+spares rPool defaultsize = mask_ $ do
     mPool <- readIORef rPool
     forM_ mPool $ \pool ->
       if (pMaxBufferCount pool > length (pAvailableLru pool))
@@ -165,7 +165,7 @@ spares rPool defaultsize = do
 
 -- | Remove and destroy excess buffers beyond our limit
 cleanup :: PoolRef handle -> IO ()
-cleanup rPool = do
+cleanup rPool = mask_ $ do
     mPool <- readIORef rPool
     forM_ mPool $ \pool ->
       if (pMaxBufferCount pool < length (pAvailableLru pool)) then
@@ -188,7 +188,7 @@ destroyBuffer pool buffer =
 -- such a buffer is not already allocated. You will get back an updated pool and
 -- the buffer object. You may provide the size of the desired buffer.
 newBuffer :: PoolRef handle -> Int -> IO (Maybe (Buffer handle))
-newBuffer rPool rmaSize = do
+newBuffer rPool rmaSize = mask_ $ do
     mres <- atomicModifyIORef rPool $ \mPool -> case mPool of
       Nothing -> (mPool, Left Nothing)
       Just pool -> case findAndRemove goodSize (pAvailableBySize pool) of
@@ -210,9 +210,10 @@ newBuffer rPool rmaSize = do
       -- the pool has been released
       Left Nothing -> return Nothing
       -- there are no idle buffers, so we request one
-      Left (Just pool0)  -> do
-        mbuf <- allocAligned' (pAlign pool0) rmaSize
-        case mbuf of
+      Left (Just pool0)  -> bracketOnError
+        (allocAligned' (pAlign pool0) rmaSize)
+        (maybe (return ()) $ freeAligned . fst)
+        $ \mbuf -> case mbuf of
           Nothing -> return Nothing
           Just cstr@(start,_) -> do
             handle <- (pRegister pool0) cstr
