@@ -64,16 +64,24 @@ data Buffer handle = Buffer
 -- that is created when a buffer is registered. In CCI's case, that is
 -- RMALocalHandle.
 data Pool handle = Pool
-     {
-        pNextId :: !BufferId,
-        pMaxBufferCount :: Int,
-        pAlign :: Int,
-        pRegister :: CStringLen -> IO handle,
-        pUnregister :: handle -> IO (),
+     { pNextId :: !BufferId
+       -- ^ The generator for buffer identifiers
+     , pMaxBufferCount :: Int
+       -- ^ The maximum amount of idle buffers that are kept
+     , pAlign :: Int
+       -- ^ Alignment required for buffers
+     , pRegister :: CStringLen -> IO handle
+       -- ^ Operation used to register buffers
+     , pUnregister :: handle -> IO ()
+       -- ^ Operation used to unregister buffers
 
-        pInUse :: Map BufferId (Buffer handle),
-        pAvailableBySize :: [Buffer handle],
-        pAvailableLru :: [BufferId]
+     , pInUse :: Map BufferId (Buffer handle)
+       -- ^ Buffers in use
+     , pAvailableBySize :: [Buffer handle]
+       -- ^ Idle buffers sorted by size
+     , pAvailableLru :: [BufferId]
+       -- ^ Idle buffers in the order they were created or returned
+       --   (the most recent buffer appears first)
      }
 
 type PoolRef handle = IORef (Maybe (Pool handle))
@@ -125,15 +133,21 @@ freeBuffer rPool buffer = do
                     in (Just newpool, Left pool)
               else let newpool = pool
                          { pInUse = Map.delete (bId buffer) (pInUse pool)
-                         , pAvailableBySize = List.insertBy (comparing bSize) buffer (pAvailableBySize pool)
+                         , pAvailableBySize =
+                             List.insertBy (comparing bSize)
+                                           buffer
+                                           (pAvailableBySize pool)
                          , pAvailableLru = bId buf : pAvailableLru pool
                          }
                     in (Just newpool, Right True)
           _ -> (mPool, Right True)
 
     case mPoolOk of
-      Right False -> freeAligned (bStart buffer)
+      -- The pool is full of idle buffers, so unregister and release.
       Left pool   -> destroyBuffer pool buffer
+      -- The pool has been released, so we release the buffer.
+      Right False -> freeAligned (bStart buffer)
+      -- The pool accepted the buffer.
       Right True  -> return ()
 
 -- | Allocate excess buffers up to our limit
@@ -191,8 +205,11 @@ newBuffer rPool rmaSize = do
           , Right buf
           )
     case mres of
+      -- reusing a recycled buffer
       Right buf  -> return $ Just buf
+      -- the pool has been released
       Left Nothing -> return Nothing
+      -- there are no idle buffers, so we request one
       Left (Just pool0)  -> do
         mbuf <- allocAligned' (pAlign pool0) rmaSize
         case mbuf of
