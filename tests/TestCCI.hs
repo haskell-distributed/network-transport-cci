@@ -27,13 +27,11 @@ testTransport' newTransport = do
     , ("ParallelConnects",      undefined)
     , ("SendAfterClose",        testSendAfterClose transport 100)
     , ("Crossing",              testCrossing transport 10)
-    -- Fails sometimes, appears to be CCI bug?
-    --, ("CloseTwice",            testCloseTwice transport 100)
+    , ("CloseTwice",            testCloseTwice transport 100)
     , ("ConnectToSelf",         testConnectToSelf transport numPings)
     , ("ConnectToSelfTwice",    testConnectToSelfTwice transport numPings)
-    -- Waiting on parallel-haskell mailing list RE. semantics
-    --, ("CloseSelf",             testCloseSelf newTransport)
-    --, ("CloseEndPoint",         testCloseEndPoint transport numPings)
+    , ("CloseSelf",             testCloseSelf newTransport)
+    , ("CloseEndPoint",         testCloseEndPoint transport numPings)
     -- FIXME: Test stalls
     --, ("CloseTransport",        testCloseTransport newTransport)
     , ("CloseTransport",      undefined)
