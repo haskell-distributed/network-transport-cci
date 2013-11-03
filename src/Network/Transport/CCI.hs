@@ -788,7 +788,7 @@ sendCore transport endpoint conn context isCtrlMsg bs =
               dbg "Connection already closed"
               throwIO $ TransportError SendClosed "Connection already closed"
   where
-    messageLength = sum (map BSC.length bs)
+    messageLength = sum (map BSC.length augmentedbs)
     augmentedbs = msgprefix:bs
     msgprefix = BSC.singleton $ chr $ if isCtrlMsg then 1 else 0
 
