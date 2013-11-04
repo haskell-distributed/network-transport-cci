@@ -30,12 +30,18 @@
 --
 module Network.Transport.CCI
   ( createTransport
+  , createCCITransport
   , CCIParameters(..)
+  , CCITransport
   , defaultCCIParameters
+  , networkTransport
   , ReceiveStrategy(..)
+  , requestBuffer
+  , returnBuffer
+  , unregisterBuffer
   ) where
 
-import Network.Transport.CCI.Pool as Pool
+import qualified Network.Transport.CCI.Pool as Pool
 
 import qualified Network.CCI as CCI
 import Network.Transport.Internal (timeoutMaybe)
@@ -68,7 +74,7 @@ import Data.Binary
 import Data.ByteString (ByteString)
 import qualified Data.ByteString.Char8 as BSC
 import qualified Data.ByteString.Lazy as BSL (toChunks, fromChunks)
-import Data.ByteString.Unsafe (unsafeUseAsCStringLen)
+import Data.ByteString.Unsafe (unsafeUseAsCStringLen, unsafeUseAsCString)
 
 import Control.Applicative ((<*>), (<$>), pure)
 import Control.Monad (liftM, forM_, void, when)
@@ -152,6 +158,7 @@ data CCITransportState
 data CCITransport = CCITransport
     { cciParameters     :: CCIParameters
     , cciTransportState :: MVar CCITransportState
+    , cciLocalEndpoints :: MVar (Map.Map EndPointAddress CCIEndpoint)
     }
 
 -- | Default values to use with 'createTransport'.
@@ -250,21 +257,95 @@ getEndpointAddress ep = EndPointAddress $ BSC.pack (cciUri ep)
 waitReady :: CCIConnection -> IO ()
 waitReady conn = takeMVar (cciReady conn) >>= mapM_ throwIO
 
+createCCITransport :: CCIParameters
+                   -> IO (Either (TransportError CCIErrorCode) CCITransport)
+createCCITransport params =
+    try $ mapCCIException (translateException CCICreateTransportFailed) $ do
+      CCI.initCCI
+      state <- newMVar CCITransportStateValid
+      mkInternalTransport state
+  where
+    mkInternalTransport st = do
+      mvLE <- newMVar Map.empty
+      return $ CCITransport
+        { cciParameters = params
+        , cciTransportState = st
+        , cciLocalEndpoints = mvLE
+        }
+
 -- | Create a transport object suitable for using with CH.
 createTransport :: CCIParameters
                 -> IO (Either (TransportError CCIErrorCode) Transport)
 createTransport params =
-    try $ mapCCIException (translateException CCICreateTransportFailed) $ do
-      CCI.initCCI
-      state <- newMVar CCITransportStateValid
-      return $ mkTransport $ mkInternalTransport state
-  where
-    mkInternalTransport st = CCITransport
-      { cciParameters = params
-      , cciTransportState = st }
-    mkTransport inter = Transport
-      { newEndPoint = apiNewEndPoint inter
-      , closeTransport = apiCloseTransport inter }
+    fmap (fmap networkTransport) $ createCCITransport params
+
+networkTransport :: CCITransport -> Transport
+networkTransport inter = Transport
+    { newEndPoint = apiNewEndPoint inter
+    , closeTransport = apiCloseTransport inter
+    }
+
+-- | Requests a buffer from the endpoint pool of buffers.
+--
+-- The given buffer is already registered for RMA operations
+-- so it will be faster to use when sending.
+--
+-- A requested buffer can be released with 'returnBuffer',
+-- in which case it may be returned by another call to
+-- 'requestBuffer'.
+--
+requestBuffer :: CCITransport -> EndPoint -> Int -> IO ByteString
+requestBuffer t e sz = do
+    les <- readMVar (cciLocalEndpoints t)
+    case Map.lookup (address e) les of
+      Just ep -> do
+        mres <- Pool.newBuffer (cciPool ep) sz
+        case mres of
+          Just buffer -> Pool.convertBufferToByteString (cciPool ep) buffer
+          Nothing     -> error "requestBuffer: pool was released"
+      Nothing  -> error "requestBuffer: unknown endpoint"
+
+-- | Returns a buffer to the pool of a given endpoint.
+--
+-- A subsequent call to 'requestBuffer' may return the given buffer.
+--
+-- It does nothing if the buffer does not belong to the pool of the endpoint.
+--
+returnBuffer :: CCITransport -> EndPoint -> ByteString -> IO ()
+returnBuffer t e bs = do
+   les <- readMVar (cciLocalEndpoints t)
+   case Map.lookup (address e) les of
+     Just ep -> do
+       mbuf <- unsafeUseAsCString bs $ flip Pool.lookupBuffer (cciPool ep)
+       case mbuf of
+         Just buf -> Pool.freeBuffer (cciPool ep) buf
+         Nothing  -> return () -- The buffer was not in the pool.
+     Nothing  -> error "returnBuffer: unknown endpoint"
+
+-- | Converts an endpoint-pool-buffer into a normal buffer.
+--
+-- Buffers from the pool of buffers are more expensive than normal buffers
+-- because they are registered for RMA operations. This means that the
+-- buffer cannot be swapped to disk and is registered with the hardware for
+-- DMA.
+--
+-- This calls unregisters the buffer therefore making the physical memory
+-- and the network hardware resources available for some other purpose.
+-- Aftewards, using this buffer for sending messages is as expensive as sending
+-- any other buffer.
+--
+-- It does nothing if the buffer does not belong to the pool of the endpoint.
+--
+unregisterBuffer :: CCITransport -> EndPoint -> ByteString -> IO ()
+unregisterBuffer t e bs = do
+   les <- readMVar (cciLocalEndpoints t)
+   case Map.lookup (address e) les of
+     Just ep -> do
+       mbuf <- unsafeUseAsCString bs $ flip Pool.lookupBuffer (cciPool ep)
+       case mbuf of
+         Just buf -> Pool.unregisterBuffer (cciPool ep) buf
+         Nothing  -> return () -- The buffer was not in the pool.
+     Nothing  -> error "returnBuffer: unknown endpoint"
 
 -- TODO this should shut down all known endpoints we'll need to keep a list of
 -- known endpoints, naturally.
@@ -330,6 +411,8 @@ apiNewEndPoint transport =
                 , resolveMulticastGroup =
                     return . Left . const resolveMulticastGroupError }
           putMVar thrdsem (transport,myEndpoint)
+          modifyMVar_ (cciLocalEndpoints transport)
+            $ return . Map.insert (address transportEndPoint) myEndpoint
           return transportEndPoint
         _ -> throwIO (TransportError NewEndPointFailed "Transport closed")
   where
@@ -954,9 +1037,14 @@ withRMABuffer :: CCIEndpoint
               -> CCI.RMA_MODE
               -> (CCI.RMALocalHandle -> IO a) -> IO a
 withRMABuffer endpoint bs mode f =
-   unsafeUseAsCStringLen bs $ \cstr ->
-       -- TODO this buffer should be aligned (to something)
-       CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
+    unsafeUseAsCStringLen bs $ \cstr -> do
+      mbuf <- Pool.lookupBuffer (fst cstr) (cciPool endpoint)
+      case mbuf of
+        Nothing ->
+          -- TODO this buffer should be aligned (to something)
+          CCI.withRMALocalHandle (cciEndpoint endpoint) cstr mode f
+        Just buf ->
+          f $ Pool.bHandle buf
 
 sendSimple :: CCI.Connection
            -> [ByteString]

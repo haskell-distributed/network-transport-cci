@@ -8,7 +8,7 @@
 module Network.Transport.CCI.Pool
   ( Pool
   , PoolRef
-  , Buffer
+  , Buffer(bHandle)
   , newPool
   , freePool
   , newBuffer
@@ -18,10 +18,12 @@ module Network.Transport.CCI.Pool
   , convertBufferToByteString
   , spares
   , cleanup
+  , lookupBuffer
+  , unregisterBuffer
   ) where
 
 import Control.Applicative ((<$>))
-import Control.Monad ( when )
+import Control.Monad (when, join)
 import Control.Exception (catch, IOException, mask_, bracketOnError)
 
 import Data.Map (Map)
@@ -34,14 +36,15 @@ import Data.ByteString.Unsafe (unsafePackCStringFinalizer)
 import Data.IORef
 import qualified Data.List as List (find, delete, deleteBy, insertBy)
 import Data.Maybe (fromJust)
-import Data.Foldable ( forM_ )
+import Data.Foldable ( forM_, mapM_ )
+import Data.List (find)
 import Data.Ord (comparing)
 import Foreign.C.Types ( CChar, CSize(..), CInt(..) )
 import Foreign.C.String (CStringLen)
 import Foreign.Marshal.Alloc (mallocBytes, free, alloca)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable ( peek )
-import Prelude
+import Prelude hiding (mapM_)
 
 
 foreign import ccall unsafe posix_memalign :: Ptr (Ptr a) -> CSize -> CSize -> IO CInt
@@ -118,6 +121,24 @@ newPool alignment maxbuffercount reg unreg =
         pInUse=Map.empty,
         pAvailableBySize=[],
         pAvailableLru=[]}
+
+-- | Lookups a buffer in a given pool.
+lookupBuffer :: Ptr CChar -> PoolRef handle -> IO (Maybe (Buffer handle))
+lookupBuffer ptr =
+    fmap (join . fmap (find ((ptr ==) . bStart) . Map.elems . pInUse))
+      . readIORef
+
+-- | Unregisters a buffer.
+unregisterBuffer :: PoolRef handle -> Buffer handle -> IO ()
+unregisterBuffer rPool buf =
+    atomicModifyIORef rPool (\mPool ->
+      case mPool of
+        Nothing   -> (mPool,Nothing)
+        Just pool -> ( Just pool { pInUse = Map.delete (bId buf) (pInUse pool) }
+                     , Just pool
+                     )
+      )
+    >>= mapM_ (\pool -> pUnregister pool (bHandle buf))
 
 -- | Release the given buffer. It won't be unregistered and deallocated
 -- immediately, but simply placed on the available list.
