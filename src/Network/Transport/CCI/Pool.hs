@@ -16,6 +16,8 @@ module Network.Transport.CCI.Pool
   , getBufferHandle
   , getBufferByteString
   , convertBufferToByteString
+  , spares
+  , cleanup
   ) where
 
 import Control.Applicative ((<$>))
@@ -27,7 +29,7 @@ import qualified Data.Map as Map
 
 import qualified Data.ByteString.Char8 as BSC
 import Data.ByteString.Char8 (ByteString)
-import Data.ByteString.Unsafe (unsafeUseAsCStringLen, unsafePackCStringFinalizer)
+import Data.ByteString.Unsafe (unsafePackCStringFinalizer)
 
 import Data.IORef
 import qualified Data.List as List (find, delete, deleteBy, insertBy)
@@ -37,7 +39,6 @@ import Data.Ord (comparing)
 import Foreign.C.Types ( CChar, CSize(..), CInt(..) )
 import Foreign.C.String (CStringLen)
 import Foreign.Marshal.Alloc (mallocBytes, free, alloca)
-import Foreign.Marshal.Utils (copyBytes)
 import Foreign.Ptr (Ptr, castPtr)
 import Foreign.Storable ( peek )
 import Prelude
@@ -90,8 +91,8 @@ type PoolRef handle = IORef (Maybe (Pool handle))
 getBufferHandle :: Buffer handle -> handle
 getBufferHandle = bHandle
 
-dbg :: String -> IO ()
-dbg = putStrLn
+_dbg :: String -> IO ()
+_dbg = putStrLn
 
 -- | Deallocates and unregisters all buffers managed
 -- by the given pool.
