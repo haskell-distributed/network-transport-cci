@@ -219,13 +219,18 @@ newBuffer rPool rmaSize = mask_ $ do
           , Left mPool
           )
         (newavailable, Just buf) ->
-          ( Just pool
-                 { pAvailableBySize = newavailable
-                 , pInUse = Map.insert (bId buf) buf (pInUse pool)
-                 , pAvailableLru = List.delete (bId buf) (pAvailableLru pool)
-                 }
-          , Right buf
-          )
+          -- We renew the identifier when recycling the buffer so there is no
+          -- danger that the GC returns the buffer of a previous incarnation,
+          -- which could happen if the buffer was returned explicitly.
+          let newbuf = buf { bId = pNextId pool }
+           in ( Just pool
+                  { pNextId = pNextId pool + 1
+                  , pAvailableBySize = newavailable
+                  , pInUse = Map.insert (bId newbuf) newbuf (pInUse pool)
+                  , pAvailableLru = List.delete (bId buf) (pAvailableLru pool)
+                  }
+              , Right newbuf
+              )
     case mres of
       -- reusing a recycled buffer
       Right buf  -> return $ Just buf
