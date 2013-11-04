@@ -87,7 +87,7 @@ import Control.Exception
     )
 import Data.Char (chr, ord)
 import Data.Foldable (mapM_)
-import Data.IORef
+import Data.IORef (newIORef)
 import Data.List (genericTake)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Typeable (Typeable)
@@ -499,8 +499,8 @@ endpointLoop transport endpoint =  loop newEpls
                            return $ epls { eplsTransfers =
                                              Map.delete remoteid transfers
                                          }
-                         closeBufferReUse :: IO EndpointLoopState
-                         closeBufferReUse = do
+                         _closeBufferReUse :: IO EndpointLoopState
+                         _closeBufferReUse = do
                            when ok $ do
                              buffermsg <- Pool.getBufferByteString buffer
                              pushEvent buffermsg
@@ -690,7 +690,7 @@ apiConnect transport endpoint remoteaddress reliability _hints =
       timeoutMaybe maybeTimeout
                    (TransportError ConnectTimeout "Connection reply timeout")
                    (waitReady cciconn)
-      sendControlMessage transport
+      void $ sendControlMessage transport
                          endpoint
                          cciconn
                          (ControlMessageInitConnection reliability
@@ -1000,7 +1000,7 @@ closeIndividualConnection :: CCITransport
                           -> CCIEndpoint
                           -> CCIConnection
                           -> IO ()
-closeIndividualConnection transport endpoint conn =
+closeIndividualConnection _transport _endpoint conn =
               do -- sendControlMessage transport endpoint conn (ControlMessageCloseConnection)
                  transportconn <- modifyMVar (cciConnectionState conn) $ \connst ->
                     case connst of
