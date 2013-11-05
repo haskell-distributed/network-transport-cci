@@ -28,6 +28,7 @@
 -- too many buffers are registered. We also expect to offer transport specific
 -- calls to promptly unregister or return buffers to the pool.
 --
+{-# LANGUAGE ForeignFunctionInterface #-}
 module Network.Transport.CCI
   ( createTransport
   , createCCITransport
@@ -98,6 +99,7 @@ import Data.List (genericTake)
 import Data.Maybe (catMaybes, fromMaybe)
 import Data.Typeable (Typeable)
 import Data.Word (Word32, Word64)
+import Foreign.C.Types (CInt(..))
 import Foreign.Ptr (WordPtr)
 import GHC.Generics (Generic)
 
@@ -347,6 +349,8 @@ unregisterBuffer t e bs = do
          Nothing  -> return () -- The buffer was not in the pool.
      Nothing  -> error "returnBuffer: unknown endpoint"
 
+foreign import ccall unsafe "unistd.h getpagesize" pagesize :: CInt
+
 -- TODO this should shut down all known endpoints we'll need to keep a list of
 -- known endpoints, naturally.
 apiCloseTransport :: CCITransport -> IO ()
@@ -380,7 +384,7 @@ apiNewEndPoint transport =
                          , cciEndpointThread = thrd
                          , cciConnectionsById = Map.empty }
           rPool <- newIORef $ Just $
-            let mostRestrictiveAlignment = maximum $
+            let mostRestrictiveAlignment = maximum $ (fromIntegral pagesize :) $
                   [ CCI.rmaWriteLocalAddr
                   , CCI.rmaWriteRemoteAddr
                   , CCI.rmaReadLocalAddr
