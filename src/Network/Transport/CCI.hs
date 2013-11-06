@@ -347,8 +347,14 @@ unregisterBuffer t e bs = do
        case mbuf of
          Just buf -> Pool.unregisterBuffer (cciPool ep) buf
          Nothing  -> return () -- The buffer was not in the pool.
-     Nothing  -> error "returnBuffer: unknown endpoint"
+     Nothing  -> error "unregisterBuffer: unknown endpoint"
 
+-- | Aligning buffers to the page size makes a difference in performance
+-- when registering big buffers for RMA operations. Registering a 4 MB buffer
+-- was measured to be 200 us (~ 20 %) faster for page aligned buffers.
+--
+-- Therefore, we employ pagesize to determine the alignment size.
+--
 foreign import ccall unsafe "unistd.h getpagesize" pagesize :: CInt
 
 -- TODO this should shut down all known endpoints we'll need to keep a list of
