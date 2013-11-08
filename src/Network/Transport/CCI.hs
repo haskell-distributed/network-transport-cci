@@ -365,7 +365,9 @@ apiCloseTransport transport =
         case st of
           CCITransportStateClosed ->
                   return CCITransportStateClosed
-          _ -> do CCI.finalizeCCI
+          _ -> do eps <- swapMVar (cciLocalEndpoints transport) Map.empty
+                  mapM_ (apiCloseEndPoint transport) eps
+                  CCI.finalizeCCI
                   return CCITransportStateClosed
 
 apiNewEndPoint :: CCITransport
@@ -729,6 +731,8 @@ apiCloseEndPoint transport endpoint = catch closeit handler
                                     (getEndpointAddress endpoint)
                                     helloPacket
                 takeMVar (cciEndpointFinalized endpoint)
+             modifyMVar_ (cciLocalEndpoints transport) $ \eps ->
+                  return $ Map.delete (address $ cciTransportEndpoint endpoint) eps
              return CCIEndpointClosed
            _ -> dbg "Endpoint already closed" >> return st
 
