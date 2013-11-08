@@ -357,8 +357,6 @@ unregisterBuffer t e bs = do
 --
 foreign import ccall unsafe "unistd.h getpagesize" pagesize :: CInt
 
--- TODO this should shut down all known endpoints we'll need to keep a list of
--- known endpoints, naturally.
 apiCloseTransport :: CCITransport -> IO ()
 apiCloseTransport transport =
    modifyMVar_ (cciTransportState transport) $ \st ->
